@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"io"
+	"mime"
 	"strings"
 	"testing"
 
@@ -66,7 +67,26 @@ func TestContentTypeAndPlayability(t *testing.T) {
 		{"movie.VOB", "video/mpeg", true},
 		{"setup.exe", "application/octet-stream", false},
 		{"README", "application/octet-stream", false},
+		{"readme.txt", "text/plain; charset=utf-8", false},
+		{"cover.JPG", "image/jpeg", false},
+		// The two that matter. A disc is a file somebody handed you, and
+		// serving its index.html as text/html would run whatever is in it
+		// in this server's origin, with this server's session cookie. The
+		// system's MIME table knows both of these; that is exactly why it
+		// is not consulted.
+		{"index.html", "application/octet-stream", false},
+		{"logo.svg", "application/octet-stream", false},
+		{"payload.js", "application/octet-stream", false},
+		{"page.xhtml", "application/octet-stream", false},
 	}
+	// The system's MIME table, which this must not be reading. It differs
+	// from machine to machine - /etc/mime.types is a package on one distro
+	// and absent on another - and this test failed in CI and passed here
+	// for exactly that reason, on a build that was otherwise identical.
+	mime.AddExtensionType(".exe", "application/x-msdownload")
+	mime.AddExtensionType(".html", "text/html")
+	mime.AddExtensionType(".svg", "image/svg+xml")
+
 	for _, tc := range cases {
 		if got := contentType(tc.name); got != tc.typ {
 			t.Errorf("contentType(%q) = %q, want %q", tc.name, got, tc.typ)

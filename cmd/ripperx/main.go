@@ -233,9 +233,9 @@ func main() {
 	})
 	mux.Handle("/", http.FileServerFS(s.web))
 
-	var handler http.Handler = mux
+	var handler http.Handler = noSniff(mux)
 	if guard != nil {
-		handler = guard.guard(mux)
+		handler = guard.guard(noSniff(mux))
 	}
 
 	srv := &http.Server{
@@ -292,6 +292,20 @@ func main() {
 
 // methodGuard answers 405 rather than running a handler for the wrong verb,
 // so the route table's Method column is enforced and not merely documented.
+// noSniff stops a browser deciding for itself what a file is.
+//
+// Everything a disc holds is served as bytes unless ripperX recognised it,
+// and a browser that sniffs bytes can decide that a file beginning with
+// "<html>" is a document and render it - in this server's origin, with this
+// server's session cookie. The type ripperX gives is the type, and this
+// header is what says so.
+func noSniff(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		next.ServeHTTP(w, r)
+	})
+}
+
 func methodGuard(rt route, h http.HandlerFunc) http.Handler {
 	allowed := append([]string{rt.Method}, rt.Extra...)
 	if rt.Method == http.MethodGet {

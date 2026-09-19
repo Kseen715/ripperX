@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"mime"
 	"net/http"
 	"net/url"
 	"path"
@@ -522,15 +521,43 @@ func isPlayable(name string) bool {
 	return ok
 }
 
-// contentType is what a file on the disc is served as. The media table
-// comes first because it is the one that decides whether a browser plays a
-// file; anything else falls back to the system's table and then to bytes.
+// viewableTypes are the other things worth naming: a browser can show them
+// in place, and none of them is a document that can run script in this
+// server's origin.
+//
+// What is deliberately absent is as important as what is here. There is no
+// .html, no .svg, no .js: a disc is a file somebody handed you, and serving
+// its index.html as text/html would run whatever is in it inside ripperX's
+// own origin, with ripperX's own session cookie. Those arrive as bytes, and
+// a browser offered bytes downloads them.
+var viewableTypes = map[string]string{
+	".txt": "text/plain; charset=utf-8",
+	".nfo": "text/plain; charset=utf-8",
+	".log": "text/plain; charset=utf-8",
+	".md":  "text/plain; charset=utf-8",
+	".cue": "text/plain; charset=utf-8",
+	".ini": "text/plain; charset=utf-8",
+	".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+	".png": "image/png", ".gif": "image/gif",
+	".webp": "image/webp", ".bmp": "image/bmp",
+	".pdf": "application/pdf",
+}
+
+// contentType is what a file on the disc is served as.
+//
+// Only types named here are used. The system's table - mime.TypeByExtension
+// - is deliberately not consulted, for two reasons. It answers differently
+// on different machines, because it reads /etc/mime.types: the same disc
+// served from two servers would come back as two different types, and a
+// test of this function passed on one machine and failed on another. And it
+// knows about .html and .svg, which are the two things a disc must never be
+// served as.
 func contentType(name string) string {
 	ext := strings.ToLower(path.Ext(name))
 	if t, ok := playableTypes[ext]; ok {
 		return t
 	}
-	if t := mime.TypeByExtension(ext); t != "" {
+	if t, ok := viewableTypes[ext]; ok {
 		return t
 	}
 	return "application/octet-stream"

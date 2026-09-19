@@ -303,3 +303,24 @@ func TestAllocationUnitIsBothNumbers(t *testing.T) {
 		t.Errorf("a 7.56 TB share came out as %.2f TB", tb)
 	}
 }
+
+// The type ripperX gives a file is the type. Without this header a browser
+// may sniff the bytes instead and decide that a file off a disc beginning
+// with "<html>" is a document to render - in this server's origin.
+func TestEveryResponseRefusesSniffing(t *testing.T) {
+	var reached bool
+	h := noSniff(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	for _, path := range []string{"/", "/api/status", "/api/drives/sr0/file?path=/x.html"} {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+		if got := w.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+			t.Errorf("%s came back with X-Content-Type-Options %q", path, got)
+		}
+	}
+	if !reached {
+		t.Error("the handler underneath was never called")
+	}
+}
