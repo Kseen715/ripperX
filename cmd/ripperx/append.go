@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -47,6 +48,8 @@ type appendRequest struct {
 	Names []string `json:"names" doc:"the files in the image store to add"`
 	// Folder is where on the disc they go. Empty puts them in the root.
 	Folder string `json:"folder,omitempty" doc:"the directory on the disc to put them in; the root by default"`
+	// Source is which library the files are in.
+	Source string `json:"source,omitempty" doc:"images (the default) or isos, the read-only library"`
 	// Verify reads every appended file back off the disc and compares it
 	// with what was sent. On by default.
 	Verify *bool `json:"verify,omitempty" doc:"read the files back off the disc and check them; defaults to true"`
@@ -109,21 +112,24 @@ func (s *server) handleAppend(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, errorResponse{Error: err.Error()})
 		return
 	}
-	caps, disc, err := d.state(2 * time.Second)
-	if err != nil {
-		writeErr(w, http.StatusServiceUnavailable, err)
-		return
-	}
-	if why := s.appendBlocker(caps, disc); why != "" {
-		writeJSON(w, http.StatusConflict, errorResponse{Error: why})
-		return
-	}
+	// The request first, the disc second: everything wrong with the request
+	// is fixable at the keyboard, and hearing about the disc before that
+	// sends someone to find a blank for a request that was never going to
+	// work.
 	if len(req.Names) == 0 {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "no files were given to add"})
 		return
 	}
-
-	// Everything that can be checked before the laser is switched on.
+	src, err := s.sourceStore(req.Source)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+	folder, err := discFolder(req.Folder)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
 	var files []storedFile
 	var total int64
 	for _, name := range req.Names {
@@ -131,18 +137,27 @@ func (s *server) handleAppend(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, errorResponse{Error: errBadName.Error()})
 			return
 		}
-		f, info, err := s.store.Open(name)
+		f, info, err := src.Open(name)
 		if err != nil {
-			writeJSON(w, http.StatusNotFound, errorResponse{Error: err.Error()})
+			code := http.StatusInternalServerError
+			if errors.Is(err, errNoSuchImage) {
+				code = http.StatusNotFound
+			}
+			writeJSON(w, code, errorResponse{Error: err.Error()})
 			return
 		}
 		f.Close()
 		files = append(files, info)
 		total += info.Size
 	}
-	folder, err := discFolder(req.Folder)
+
+	caps, disc, err := d.state(2 * time.Second)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		writeErr(w, http.StatusServiceUnavailable, err)
+		return
+	}
+	if why := s.appendBlocker(caps, disc); why != "" {
+		writeJSON(w, http.StatusConflict, errorResponse{Error: why})
 		return
 	}
 	if room := disc.WritableBytes; total+appendOverhead > room {
@@ -166,7 +181,7 @@ func (s *server) handleAppend(w http.ResponseWriter, r *http.Request) {
 
 	job, err := s.jobs.startOnDrive(d, "append", label, jobTotal,
 		func(ctx context.Context, rec *jobRecord) error {
-			return s.appendFiles(ctx, rec, d, files, folder, verify, req.Close)
+			return s.appendFiles(ctx, rec, d, src, files, folder, verify, req.Close)
 		})
 	if err != nil {
 		writeJSON(w, http.StatusConflict, errorResponse{Error: err.Error()})
@@ -195,7 +210,7 @@ func discFolder(name string) (string, error) {
 	return clean, nil
 }
 
-func (s *server) appendFiles(ctx context.Context, rec *jobRecord, d *drive, files []storedFile, folder string, verify, closeDisc bool) error {
+func (s *server) appendFiles(ctx context.Context, rec *jobRecord, d *drive, src store, files []storedFile, folder string, verify, closeDisc bool) error {
 	// The burner is a separate process and reads from a path, so anything
 	// on a share is copied locally first - which is also where a share that
 	// has gone away is discovered, before the disc is touched rather than
@@ -204,7 +219,7 @@ func (s *server) appendFiles(ctx context.Context, rec *jobRecord, d *drive, file
 	staged := make([]string, 0, len(files))
 	sums := make([]string, 0, len(files))
 	for _, f := range files {
-		p, cleanup, err := s.stageImage(ctx, rec, f)
+		p, cleanup, err := s.stageImage(ctx, rec, src, f)
 		if cleanup != nil {
 			defer cleanup()
 		}

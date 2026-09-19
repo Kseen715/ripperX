@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"strings"
 	"testing"
 
@@ -281,5 +282,80 @@ func TestUnknownFreeSpaceIsNotTheSameAsFull(t *testing.T) {
 	// only thing that makes it diagnosable.
 	if !strings.Contains(got, "READ TRACK INFORMATION") {
 		t.Errorf("the drive's own words were dropped: %q", got)
+	}
+}
+
+// The read-only library must refuse to be written to structurally, not by
+// convention: a convention is one forgotten call away from deleting
+// somebody's Windows ISO.
+func TestReadOnlyStoreRefusesWrites(t *testing.T) {
+	ro := readOnlyStore{emptyStore{}}
+	if _, err := ro.Create("x.iso"); !errors.Is(err, errReadOnlyStore) {
+		t.Errorf("Create gave %v, want a refusal", err)
+	}
+	if err := ro.Remove("x.iso"); !errors.Is(err, errReadOnlyStore) {
+		t.Errorf("Remove gave %v, want a refusal", err)
+	}
+	if _, ok := ro.FreeBytes(); ok {
+		t.Error("free space is meaningless for a library nothing is written to")
+	}
+	// Reading still works, which is the whole point of having it.
+	if _, _, err := ro.Open("x.iso"); errors.Is(err, errReadOnlyStore) {
+		t.Error("reading was refused as if it were a write")
+	}
+	// A read-only local store must not hand out a path the burner could
+	// write through.
+	if _, ok := any(ro).(interface{ localPath(string) (string, bool) }); ok {
+		t.Error("the read-only wrapper exposes localPath, which reaches the directory behind it")
+	}
+}
+
+// Which library a request means, and what happens when it names one that is
+// not there.
+func TestSourceStore(t *testing.T) {
+	writable := emptyStore{}
+	library := readOnlyStore{emptyStore{}}
+	s := &server{store: writable, isos: library}
+
+	for _, name := range []string{"", "images"} {
+		got, err := s.sourceStore(name)
+		if err != nil || got != store(writable) {
+			t.Errorf("source %q gave %v, %v; want the writable store", name, got, err)
+		}
+	}
+	if got, err := s.sourceStore("isos"); err != nil || got != store(library) {
+		t.Errorf("source isos gave %v, %v", got, err)
+	}
+	if _, err := s.sourceStore("elsewhere"); err == nil {
+		t.Error("an unknown source was accepted")
+	}
+
+	// A server with no library says so rather than falling back to the
+	// writable store, which would burn the wrong file.
+	none := &server{store: writable}
+	if _, err := none.sourceStore("isos"); !errors.Is(err, errNoISOStore) {
+		t.Errorf("with no library configured, source isos gave %v", err)
+	}
+}
+
+// Saying which disc an image needs is the difference between finding out
+// now and finding out with a blank in the drive.
+func TestDiscNeeded(t *testing.T) {
+	cases := []struct {
+		size int64
+		want string
+	}{
+		{100 << 20, "CD"},
+		{capacityCD80, "CD"},
+		{capacityCD80 + 1, "DVD"},
+		{capacityDVD, "DVD"},
+		{capacityDVD + 1, "dual-layer DVD"},
+		{capacityDVDDL, "dual-layer DVD"},
+		{capacityDVDDL + 1, "nothing this drive writes"},
+	}
+	for _, tc := range cases {
+		if got := discNeeded(tc.size); got != tc.want {
+			t.Errorf("discNeeded(%d) = %q, want %q", tc.size, got, tc.want)
+		}
 	}
 }

@@ -22,11 +22,16 @@ const state = {
   entries: [],
   picked: new Set(),
   images: [],
+  isos: [],
+  // What the selected burn image turned out to be, from /api/imageinfo.
+  burnInfo: null,
   formats: [],
   discs: [],
   // What the archive dialog is for when it opens: a download of one folder,
   // or a rip of whatever is ticked.
   archiveFor: null,
+  // Which row the image picker is on, for the keyboard.
+  pickAt: 0,
 };
 
 /* ---------- small helpers ---------- */
@@ -298,9 +303,10 @@ function renderDiscTab(d) {
     ['As .iso', disc.dataTracks ? bytes(disc.dataBytes) : null],
     ['As .img', disc.rawReadable ? bytes(disc.rawBytes) : null],
     ['Volume', vol ? vol.volumeId : null],
+    ['Filesystem', vol ? (vol.format || 'ISO 9660') : null],
     ['Published', vol && vol.publisher ? vol.publisher : null],
     ['Mastered', vol && vol.created ? when(vol.created) : null],
-    ['Names', vol ? (vol.joliet ? 'Joliet' : (vol.rockRidge ? 'Rock Ridge' : 'ISO 9660 only')) : null],
+    ['Names', vol ? namingScheme(vol) : null],
     ['Media id', disc.mediaId || null],
   ]);
 
@@ -339,6 +345,200 @@ function ripHint(d) {
   return bits.join(' ');
 }
 
+function burnSource() {
+  return el('burnSource').value === 'isos' ? state.isos : state.images;
+}
+
+/* ---------- the image picker ---------- */
+
+// A file the drive could not fit on anything it writes. The server names
+// the smallest disc an image needs; this is what it says when there is not
+// one.
+const noDiscFits = 'nothing this drive writes';
+
+// What is worth knowing about an image at the moment of choosing it. It all
+// comes from the listing, which already looked inside each file: an
+// installer is chosen by what it boots, and that is not in its name.
+function imageTags(f) {
+  const tags = [];
+  const boot = f.boot;
+  if (boot && boot.bootable) {
+    for (const p of boot.platforms || []) tags.push(['fw', p.name]);
+    for (const a of boot.architectures || []) tags.push(['arch', a]);
+  } else if (f.error) {
+    tags.push(['bad', 'not an ISO']);
+  } else if (boot) {
+    tags.push(['bad', 'will not boot']);
+  }
+  if (f.needs === noDiscFits) tags.push(['bad', 'too big for any disc']);
+  else if (f.needs) tags.push(['disc', `needs ${f.needs}`]);
+  return tags;
+}
+
+function tagEl(cls, text) {
+  const s = document.createElement('span');
+  s.className = `tag-x ${cls}`;
+  s.textContent = text;
+  return s;
+}
+
+// Everything the picker can be asked for, in the order it is listed.
+function pickable() {
+  return burnSource().filter((f) => f.size > 0 && f.size % 2048 === 0);
+}
+
+// Typing filters on everything shown, not only the name: "uefi", "aarch64"
+// and "dvd" are the three things somebody standing at a drive is actually
+// looking for.
+function pickMatches() {
+  const q = el('burnFilter').value.trim().toLowerCase();
+  const all = pickable();
+  if (!q) return all;
+  return all.filter((f) => {
+    const hay = [f.name, f.volume || '', f.needs || '']
+      .concat(imageTags(f).map(([, t]) => t)).join(' ').toLowerCase();
+    return q.split(/\s+/).every((word) => hay.includes(word));
+  });
+}
+
+function currentImage() {
+  const name = el('burnImage').value;
+  return pickable().find((f) => f.name === name) || null;
+}
+
+// The button says what is chosen, with the same tags the menu shows, so
+// nothing has to be reopened to check what is about to be written.
+function renderPickButton() {
+  const btn = el('burnPick');
+  btn.textContent = '';
+  const f = currentImage();
+  const name = document.createElement('span');
+  name.className = 'pick-name';
+  if (!f) {
+    name.classList.add('pick-none');
+    name.textContent = pickable().length ? 'Choose an image' : 'Nothing to burn';
+    btn.appendChild(name);
+    return;
+  }
+  name.textContent = f.name;
+  btn.appendChild(name);
+  for (const [cls, text] of imageTags(f).slice(0, 3)) btn.appendChild(tagEl(cls, text));
+}
+
+function renderPickList() {
+  const list = el('burnList');
+  const files = pickMatches();
+  list.textContent = '';
+  const chosen = el('burnImage').value;
+  files.forEach((f, i) => {
+    const opt = document.createElement('button');
+    opt.type = 'button';
+    opt.className = 'pick-opt';
+    opt.setAttribute('role', 'option');
+    opt.setAttribute('aria-selected', String(f.name === chosen));
+    opt.id = `pickOpt${i}`;
+    if (i === state.pickAt) opt.classList.add('here');
+
+    const top = document.createElement('div');
+    top.className = 'pick-top';
+    const file = document.createElement('span');
+    file.className = 'pick-file';
+    file.textContent = f.name;
+    const size = document.createElement('span');
+    size.className = 'pick-size';
+    size.textContent = bytes(f.size);
+    top.append(file, size);
+    opt.appendChild(top);
+
+    const tags = imageTags(f);
+    if (f.volume) tags.unshift(['', f.volume]);
+    if (tags.length) {
+      const row = document.createElement('div');
+      row.className = 'pick-tags';
+      for (const [cls, text] of tags) row.appendChild(tagEl(cls, text));
+      opt.appendChild(row);
+    }
+    opt.addEventListener('click', () => { chooseImage(f.name); closePicker(); });
+    list.appendChild(opt);
+  });
+  const empty = el('burnEmpty');
+  empty.hidden = files.length > 0;
+  if (!files.length) {
+    empty.textContent = pickable().length
+      ? 'Nothing here matches that.'
+      : 'Nothing in this library is a whole number of 2048-byte sectors.';
+  }
+  const here = list.querySelector('.here');
+  if (here) {
+    here.scrollIntoView({ block: 'nearest' });
+    el('burnList').setAttribute('aria-activedescendant', here.id);
+  }
+}
+
+function chooseImage(name) {
+  const sel = el('burnImage');
+  if (sel.value === name) return;
+  sel.value = name;
+  renderPickButton();
+  showBurnImageInfo();
+}
+
+function openPicker() {
+  if (pickable().length === 0) return;
+  state.pickAt = Math.max(0, pickMatches().findIndex((f) => f.name === el('burnImage').value));
+  el('burnPicker').classList.add('open');
+  el('burnPop').hidden = false;
+  el('burnPick').setAttribute('aria-expanded', 'true');
+  renderPickList();
+  el('burnFilter').focus();
+  el('burnFilter').select();
+}
+
+function closePicker(refocus = true) {
+  el('burnPicker').classList.remove('open');
+  el('burnPop').hidden = true;
+  el('burnPick').setAttribute('aria-expanded', 'false');
+  if (refocus) el('burnPick').focus();
+}
+
+function pickerOpen() { return !el('burnPop').hidden; }
+
+function movePick(by) {
+  const files = pickMatches();
+  if (!files.length) return;
+  state.pickAt = (state.pickAt + by + files.length) % files.length;
+  renderPickList();
+}
+
+function wirePicker() {
+  el('burnPick').addEventListener('click', () => {
+    if (pickerOpen()) closePicker(); else openPicker();
+  });
+  el('burnPick').addEventListener('keydown', (ev) => {
+    if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') { ev.preventDefault(); openPicker(); }
+  });
+  el('burnFilter').addEventListener('input', () => { state.pickAt = 0; renderPickList(); });
+  el('burnPop').addEventListener('keydown', (ev) => {
+    switch (ev.key) {
+      case 'ArrowDown': ev.preventDefault(); movePick(1); break;
+      case 'ArrowUp': ev.preventDefault(); movePick(-1); break;
+      case 'Home': ev.preventDefault(); state.pickAt = 0; renderPickList(); break;
+      case 'End': ev.preventDefault(); state.pickAt = pickMatches().length - 1; renderPickList(); break;
+      case 'Enter': {
+        ev.preventDefault();
+        const f = pickMatches()[state.pickAt];
+        if (f) { chooseImage(f.name); closePicker(); }
+        break;
+      }
+      case 'Escape': ev.preventDefault(); closePicker(); break;
+    }
+  });
+  // A click anywhere else means "not this one after all".
+  document.addEventListener('click', (ev) => {
+    if (pickerOpen() && !el('burnPicker').contains(ev.target)) closePicker(false);
+  });
+}
+
 function renderBurnBox(d) {
   const allowed = state.status && state.status.allowBurn;
   el('burnBox').hidden = !allowed;
@@ -351,21 +551,77 @@ function renderBurnBox(d) {
   }
   el('btnErase').hidden = !(d.disc && d.disc.present && d.disc.erasable);
 
+  // The library picker only appears when the server has a library.
+  const hasISOs = !!(state.status && state.status.isoStore);
+  el('burnSource').parentElement.hidden = !hasISOs;
+  if (!hasISOs) el('burnSource').value = 'images';
+
+  // The hidden <select> stays the one place the chosen name lives, so the
+  // burn button and the preflight read one field whatever the menu does.
   const sel = el('burnImage');
   const was = sel.value;
   sel.textContent = '';
-  const burnable = state.images.filter((f) => f.size > 0 && f.size % 2048 === 0);
+  const burnable = pickable();
   for (const f of burnable) {
     const o = document.createElement('option');
     o.value = f.name;
-    o.textContent = `${f.name} — ${bytes(f.size)}`;
+    o.textContent = f.name;
     sel.appendChild(o);
   }
-  if (burnable.some((f) => f.name === was)) sel.value = was;
+  sel.value = burnable.some((f) => f.name === was) ? was : '';
   el('btnBurn').disabled = burnable.length === 0;
   el('burnHint').textContent = burnable.length === 0
-    ? 'No image in the store is a whole number of 2048-byte sectors. Upload an .iso, or convert a raw .img below.'
+    ? (el('burnSource').value === 'isos'
+        ? 'Nothing in the ISO library is a whole number of 2048-byte sectors.'
+        : 'No image in the store is a whole number of 2048-byte sectors. Upload an .iso, or convert a raw .img below.')
     : 'Everything that can be checked is checked before the laser is switched on. Afterwards every sector is read back and compared with the image.';
+  renderPickButton();
+  if (pickerOpen()) renderPickList();
+  showBurnImageInfo();
+}
+
+// What the chosen image actually is: whether it is really an ISO, which
+// disc it needs, and whether a disc written from it will boot. That last
+// one cannot be told by looking at the file, and is why this exists - a
+// disk image meant for a USB stick is the same shape as an ISO.
+async function showBurnImageInfo() {
+  const name = el('burnImage').value;
+  const source = el('burnSource').value;
+  const note = el('burnBoot');
+  if (!name) {
+    note.hidden = true;
+    state.burnInfo = null;
+    return;
+  }
+  // The ISO library listing already looked inside every file, so there is
+  // nothing to ask the server: the answer is in hand before the menu
+  // closes. The image store is listed without reading anything, so that
+  // one is asked about.
+  const known = currentImage();
+  if (known && known.summary) {
+    showImageNote(known);
+    return;
+  }
+  try {
+    const info = await api(
+      `/api/imageinfo?name=${encodeURIComponent(name)}&source=${encodeURIComponent(source)}`);
+    // The menu may have moved on while this was in flight.
+    if (el('burnImage').value !== name) return;
+    showImageNote(info);
+  } catch (e) {
+    state.burnInfo = null;
+    note.hidden = true;
+  }
+}
+
+function showImageNote(info) {
+  const note = el('burnBoot');
+  state.burnInfo = info;
+  note.textContent = info.summary;
+  // Hatched when it will not boot or is not an image at all; plain when it
+  // is what it should be.
+  note.className = (info.error || (info.boot && !info.boot.bootable)) ? 'warn' : 'note';
+  note.hidden = false;
 }
 
 /* ---------- how healthy the disc is ---------- */
@@ -574,6 +830,7 @@ function openArchiveDialog(purpose) {
   el('archiveTitle').textContent = purpose.title;
   el('archiveWhat').textContent = purpose.what;
   el('archiveGo').textContent = purpose.action;
+  renderWhere(purpose.where || 'browser');
 
   const box = el('archiveFormats');
   box.textContent = '';
@@ -602,6 +859,48 @@ function openArchiveDialog(purpose) {
 function chosenFormat() {
   const picked = el('archiveFormats').querySelector('input:checked');
   return picked ? picked.value : 'zip';
+}
+
+// Where the result of a download goes. Pulling a folder off a disc and
+// straight onto the share is the same work as sending it to this browser,
+// and on a laptop over wifi it is the one that finishes - so it is offered
+// beside it rather than hidden in the rip panel.
+const destinations = [
+  ['browser', 'This browser', 'Sent to the machine you are looking at, as a normal download.'],
+  ['store', 'The image store', 'Written on the server, beside the rips. Nothing crosses the network twice.'],
+];
+
+function renderWhere(initial) {
+  const box = el('archiveWhere');
+  box.textContent = '';
+  for (const [id, name, why] of destinations) {
+    const label = document.createElement('label');
+    const radio = document.createElement('input');
+    radio.type = 'radio';
+    radio.name = 'archiveWhere';
+    radio.value = id;
+    radio.checked = id === initial;
+    if (radio.checked) label.className = 'on';
+    radio.addEventListener('change', () => {
+      for (const l of box.querySelectorAll('label')) l.classList.remove('on');
+      label.classList.add('on');
+      // A file going to the store is written by a job, which shows up in
+      // the job list; say so while the choice is still being made.
+      el('archiveGo').textContent = id === 'store'
+        ? 'Save' : (state.archiveFor ? state.archiveFor.action : 'Download');
+    });
+    label.appendChild(radio);
+    const body = document.createElement('span');
+    body.appendChild(text('span', name, 'name'));
+    body.appendChild(text('span', id === 'store' && state.status ? `${why} ${state.status.store}` : why, 'why'));
+    label.appendChild(body);
+    box.appendChild(label);
+  }
+}
+
+function chosenWhere() {
+  const picked = el('archiveWhere').querySelector('input:checked');
+  return picked ? picked.value : 'browser';
 }
 
 // A disc with data on it usually cannot be burned and very often can be
@@ -783,14 +1082,21 @@ function fileRow(id, e) {
     a.href = file;
     a.textContent = 'Download';
     act.appendChild(a);
+    // The same file, written on the server instead of sent here. It is a
+    // rip of one path, so it appears in the job list like any other.
+    const save = text('button', 'Save');
+    save.type = 'button';
+    save.title = 'Write this file into the image store';
+    save.addEventListener('click', () => startRip('files', { paths: [e.path] }));
+    act.appendChild(save);
   } else {
     const b = text('button', 'Download\u2026');
     b.type = 'button';
     b.addEventListener('click', () => openArchiveDialog({
-      title: 'Download folder',
+      title: 'Take this folder',
       what: `${e.path} \u2014 everything under it, as one archive.`,
       action: 'Download',
-      run: (format) => downloadArchive(id, e.path, format),
+      run: (format, where) => takeFolder(id, e.path, format, where),
     }));
     act.appendChild(b);
   }
@@ -831,6 +1137,32 @@ function togglePlayer(tr, e, url) {
 function downloadArchive(id, path, format) {
   window.location.href =
     `/api/drives/${encodeURIComponent(id)}/archive?path=${encodeURIComponent(path)}&format=${encodeURIComponent(format)}`;
+}
+
+// takeFolder is the same folder either way: the browser downloads it, or
+// the server writes it into the image store as a rip.
+function takeFolder(id, path, format, where) {
+  if (where === 'store') startRip('files', { paths: [path], format });
+  else downloadArchive(id, path, format);
+}
+
+// downloadPicked sends the ticked files to the browser. Nothing on the
+// server streams an arbitrary set of paths as one archive - a folder or a
+// file is what a URL can name - and twenty downloads at once is not a
+// kindness, so anything else is said plainly rather than half done.
+function downloadPicked() {
+  const paths = Array.from(state.picked);
+  if (paths.length === 1) {
+    downloadDiscFile(state.selected, paths[0]);
+    return;
+  }
+  fail('A browser download takes one file or one whole folder at a time. Tick a single file, ' +
+    'use Download on the folder itself, or save the selection to the image store.');
+}
+
+function downloadDiscFile(id, path) {
+  window.location.href =
+    `/api/drives/${encodeURIComponent(id)}/file?path=${encodeURIComponent(path)}`;
 }
 
 function updatePicked() {
@@ -1006,6 +1338,30 @@ function jobRow(j) {
 
 /* ---------- images ---------- */
 
+function upperFirst(s) {
+  return s ? s[0].toUpperCase() + s.slice(1) : s;
+}
+
+// Which naming scheme the disc's names came from. It is worth showing
+// because it is the difference between a disc whose names survive a copy
+// and one whose names were flattened to 8.3 by its author. UDF has no such
+// distinction: it has had real names since it was written.
+function namingScheme(vol) {
+  if (vol.format === 'UDF') return 'UDF, any script';
+  if (vol.joliet) return 'Joliet';
+  if (vol.rockRidge) return 'Rock Ridge';
+  return 'ISO 9660 only';
+}
+
+async function loadISOs() {
+  try {
+    const r = await api('/api/isos');
+    state.isos = r.files || [];
+  } catch (e) {
+    state.isos = [];
+  }
+}
+
 async function loadImages() {
   try {
     const r = await api('/api/images');
@@ -1142,25 +1498,28 @@ function wireActions() {
       return;
     }
     openArchiveDialog({
-      title: 'Save to images',
-      what: `${n} selected items, wrapped in one archive in the image store.`,
+      title: 'Take what is ticked',
+      what: `${n} selected items, wrapped in one archive.`,
       action: 'Save',
-      run: (format) => startRip('files', { paths: Array.from(state.picked), format }),
+      where: 'store',
+      run: (format, where) => where === 'store'
+        ? startRip('files', { paths: Array.from(state.picked), format })
+        : downloadPicked(),
     });
   });
 
   el('btnArchive').addEventListener('click', () => openArchiveDialog({
-    title: 'Download folder',
+    title: 'Take this folder',
     what: `${state.path} \u2014 everything under it, as one archive.`,
     action: 'Download',
-    run: (format) => downloadArchive(state.selected, state.path, format),
+    run: (format, where) => takeFolder(state.selected, state.path, format, where),
   }));
 
   el('archiveDialog').addEventListener('close', () => {
     const dlg = el('archiveDialog');
     const purpose = state.archiveFor;
     state.archiveFor = null;
-    if (dlg.returnValue === 'ok' && purpose) purpose.run(chosenFormat());
+    if (dlg.returnValue === 'ok' && purpose) purpose.run(chosenFormat(), chosenWhere());
   });
 
   el('btnScan').addEventListener('click', async () => {
@@ -1182,19 +1541,30 @@ function wireActions() {
     updatePicked();
   });
 
+  el('burnSource').addEventListener('change', () => {
+    if (state.detail) renderBurnBox(state.detail);
+  });
+  wirePicker();
+
   el('btnBurn').addEventListener('click', async () => {
     const d = state.detail;
     const image = el('burnImage').value;
     if (!d || !image) return;
     const dummy = el('burnDummy').checked;
-    const what = dummy
+    let what = dummy
       ? `Rehearse writing ${image} in ${d.id}? The laser stays off and the disc is untouched.`
       : `Write ${image} to the disc in ${d.id}?\n\nThis cannot be undone: whatever is on the disc now is gone.`;
+    // If it will not boot, say so here rather than after the disc is spent.
+    const info = state.burnInfo;
+    if (!dummy && info && info.boot && !info.boot.bootable) {
+      what += `\n\n${upperFirst(info.boot.why || 'This image will not boot.')}`;
+    }
     if (!window.confirm(what)) return;
     try {
       await post('/api/burn', {
         drive: d.id,
         image,
+        source: el('burnSource').value,
         speedX: Number(el('burnSpeed').value) || 0,
         dummy,
         verify: el('burnVerify').checked,
@@ -1343,7 +1713,7 @@ async function main() {
     el('warning').hidden = false;
   }
   el('storeFoot').textContent = s.store;
-  await Promise.all([loadImages(), loadFormats(), loadDiscs()]);
+  await Promise.all([loadImages(), loadISOs(), loadFormats(), loadDiscs()]);
   connect();
 }
 

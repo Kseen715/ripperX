@@ -3,14 +3,17 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/Kseen715/ripperX/discfs"
 	"github.com/Kseen715/ripperX/iso9660"
 	"github.com/Kseen715/ripperX/mmc"
+	"github.com/Kseen715/ripperX/udf"
 )
 
 // A drive is one piece of hardware, and everything that wants it has to
@@ -35,12 +38,14 @@ type drive struct {
 	// mu guards everything below, including busy - which has to be
 	// readable without waiting on rw, since saying "busy" is the whole
 	// point.
-	mu     sync.Mutex
-	busy   string // job id holding the drive, or ""
-	dev    *mmc.Drive
-	caps   *mmc.Capabilities
-	disc   *mmc.Disc
-	iso    *iso9660.FS
+	mu   sync.Mutex
+	busy string // job id holding the drive, or ""
+	dev  *mmc.Drive
+	caps *mmc.Capabilities
+	disc *mmc.Disc
+	// iso is the filesystem on the disc in the drive, whichever of the two
+	// formats it turned out to be.
+	iso    discfs.FS
 	isoErr error
 	// discAt is when disc was last read, so a stale answer can be refreshed
 	// without asking the drive on every request.
@@ -308,11 +313,11 @@ func (d *drive) state(maxAge time.Duration) (*mmc.Capabilities, *mmc.Disc, error
 	return caps, disc, nil
 }
 
-// filesystem returns the ISO 9660 volume on the disc, reading its
-// descriptors the first time and keeping the result until the disc changes.
-// A disc with no filesystem - an audio CD, a UDF-only disc - gives an error
-// that is remembered too, so a page that polls does not re-probe every time.
-func (d *drive) filesystem() (*iso9660.FS, error) {
+// filesystem returns the filesystem on the disc, reading its descriptors
+// the first time and keeping the result until the disc changes. A disc with
+// no filesystem - an audio CD, a blank - gives an error that is remembered
+// too, so a page that polls does not re-probe every time.
+func (d *drive) filesystem() (discfs.FS, error) {
 	caps, disc, err := d.state(5 * time.Second)
 	if err != nil {
 		return nil, err
@@ -335,10 +340,10 @@ func (d *drive) filesystem() (*iso9660.FS, error) {
 		return nil, cachedErr
 	}
 
-	var fsys *iso9660.FS
+	var fsys discfs.FS
 	err = d.borrow(func(dev *mmc.Drive) error {
 		var e error
-		fsys, e = iso9660.OpenSession(dev.DataReaderAt(disc.Sectors), disc.LastSessionStart)
+		fsys, e = openDiscFS(dev.DataReaderAt(disc.Sectors), disc)
 		return e
 	})
 	d.mu.Lock()
@@ -348,6 +353,32 @@ func (d *drive) filesystem() (*iso9660.FS, error) {
 		return nil, err
 	}
 	return fsys, nil
+}
+
+// openDiscFS reads whichever filesystem is on the disc.
+//
+// ISO 9660 is tried first because it is the one a bridged disc wants read:
+// a disc with both carries the same files under both, and the ISO 9660 side
+// brings Joliet and Rock Ridge with it. UDF is tried when there is no ISO
+// 9660 at all, which is the case for a DVD-Video, a game disc, and most
+// DVDs written by Windows - discs that are full of files and that a reader
+// of ISO 9660 alone calls empty.
+func openDiscFS(r io.ReaderAt, disc *mmc.Disc) (discfs.FS, error) {
+	fsys, isoErr := iso9660.OpenSession(r, disc.LastSessionStart)
+	if isoErr == nil {
+		return fsys, nil
+	}
+	ufs, udfErr := udf.Open(r, disc.Sectors)
+	if udfErr == nil {
+		return ufs, nil
+	}
+	// Neither: report the ISO 9660 failure, which is the one that describes
+	// an ordinary disc, and name UDF so the answer is not misleading about
+	// what was looked for.
+	if errors.Is(udfErr, udf.ErrNotUDF) {
+		return nil, fmt.Errorf("%w (and no UDF filesystem either)", isoErr)
+	}
+	return nil, fmt.Errorf("%w (its UDF filesystem could not be read: %v)", isoErr, udfErr)
 }
 
 // driveView is one drive as the page sees it: what it is, what it can do,

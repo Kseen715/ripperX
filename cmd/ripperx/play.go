@@ -437,7 +437,47 @@ func contentDisposition(r *http.Request, name string) string {
 	if r.URL.Query().Get("inline") == "1" {
 		kind = "inline"
 	}
+	// A header field is Latin-1 by rule, so a name with Cyrillic in it -
+	// or Greek, or a Japanese track title - cannot go in filename= and
+	// arrive intact. RFC 5987 carries it in filename*, percent-encoded
+	// UTF-8, which every browser prefers when it is there. The plain
+	// filename= stays beside it, folded to ASCII, for whatever does not.
+	if ascii := asciiName(name); ascii != name {
+		return fmt.Sprintf("%s; filename=%q; filename*=UTF-8''%s", kind, ascii, percentEncode(name))
+	}
 	return fmt.Sprintf("%s; filename=%q", kind, name)
+}
+
+// asciiName is the fallback name: the same name with everything a header
+// cannot carry replaced, so it is still recognisable rather than empty.
+func asciiName(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r < 0x20, r == 0x7f, r > 0x7e, r == '"', r == '\\':
+			b.WriteByte('_')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// percentEncode writes a name as RFC 5987 wants it: UTF-8, with everything
+// outside the small set of characters a header value may hold spelled out
+// in percent escapes.
+func percentEncode(name string) string {
+	const safe = "!#$&+-.^_`|~"
+	var b strings.Builder
+	for _, c := range []byte(name) {
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' ||
+			strings.IndexByte(safe, c) >= 0 {
+			b.WriteByte(c)
+			continue
+		}
+		fmt.Fprintf(&b, "%%%02X", c)
+	}
+	return b.String()
 }
 
 // playableTypes are the media formats a browser will open without help.

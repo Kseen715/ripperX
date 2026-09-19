@@ -36,6 +36,10 @@
   }
 }
 * { box-sizing: border-box; border-radius: 0 !important; }
+/* Keep the scrollbar's width reserved whether or not there is a scrollbar.
+   Without this, a page that grows past the viewport - a job list, a disc
+   with a lot of files - shifts everything sideways as it appears. */
+html { scrollbar-gutter: stable; }
 /* Must outrank a rule like #stage img { display: block }, or a src-less <img>
    shows the browser's broken-image glyph. */
 [hidden] { display: none !important; }

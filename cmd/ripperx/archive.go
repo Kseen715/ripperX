@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/Kseen715/ripperX/discfs"
 	"github.com/Kseen715/ripperX/iso9660"
 	"github.com/dsnet/compress/bzip2"
 	"github.com/ulikunitz/xz"
@@ -236,7 +237,7 @@ type archiveProgress struct {
 // writeArchive puts every file of a plan into one archive. It is shared by
 // the download, which writes to the response, and by the rip, which writes
 // to the image store.
-func writeArchive(ctx context.Context, w io.Writer, format archiveFormat, fsys *iso9660.FS, plan filePlan, p archiveProgress) error {
+func writeArchive(ctx context.Context, w io.Writer, format archiveFormat, fsys discfs.FS, plan filePlan, p archiveProgress) error {
 	ar, err := newArchiveWriter(format, w)
 	if err != nil {
 		return err

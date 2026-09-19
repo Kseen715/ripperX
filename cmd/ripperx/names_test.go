@@ -8,29 +8,83 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
 // validName is the only thing between a name from a request and a path
-// joined onto the image directory or onto an SMB share, so the traversals
-// that matter are the ones spelled with the separator of the *other*
-// system: filepath.Base on Linux passes a backslash straight through.
+// joined onto the image directory or onto an SMB share. The traversals that
+// matter are the ones spelled with the separator of the *other* system:
+// filepath.Base on Linux passes a backslash straight through.
 func TestValidNameRefusesEscapes(t *testing.T) {
-	bad := []string{
-		"", ".", "..", "../secret", `..\..\secret.iso`, "/etc/passwd",
-		`dir\file.iso`, "dir/file.iso", ".hidden", "with space.iso",
-		"nul\x00.iso", "naïve.iso", strings.Repeat("a", 201),
+	bad := []struct{ name, why string }{
+		{"", "empty"},
+		{".", "the current directory"},
+		{"..", "the parent directory"},
+		{"../secret.iso", "a traversal"},
+		{`..\..\secret.iso`, "a traversal spelled for Windows"},
+		{"/etc/passwd", "an absolute path"},
+		{`dir\file.iso`, "a Windows separator"},
+		{"dir/file.iso", "a Unix separator"},
+		{".hidden", "a hidden file"},
+		{"stream.iso:$DATA", "an alternate data stream"},
+		{"nul\x00.iso", "a NUL"},
+		{"bell\x07.iso", "a control character"},
+		{"tab\there.iso", "a tab"},
+		{strings.Repeat("a", 256), "longer than any filesystem allows"},
 	}
-	for _, name := range bad {
-		if validName(name) {
-			t.Errorf("validName(%q) is true, it must not be", name)
+	for _, tc := range bad {
+		if validName(tc.name) {
+			t.Errorf("validName(%q) is true; it is %s", tc.name, tc.why)
 		}
 	}
-	good := []string{"disc.iso", "a", "EPSON-20260919-093233.img", "x_y-z+1.tar", "A.B.C"}
+}
+
+// And what it must accept: the names real files actually have. Refusing to
+// list a file is not a security property - it is a disc image nobody can
+// burn. A shelf of installer images includes "tiny11 23H2 x64.iso".
+func TestValidNameAcceptsRealFileNames(t *testing.T) {
+	good := []string{
+		"disc.iso",
+		"a",
+		"EPSON-20260919-093233.img",
+		"x_y-z+1.tar",
+		"tiny11 23H2 x64.iso",
+		"ru-ru_windows_11_consumer_editions_version_24h2.iso",
+		"Полис.iso",
+		"naïve.iso",
+		"image (copy).iso",
+		"a.b.c",
+		strings.Repeat("a", 255),
+	}
 	for _, name := range good {
 		if !validName(name) {
-			t.Errorf("validName(%q) is false, it should be a usable name", name)
+			t.Errorf("validName(%q) is false; it is a name a real file has", name)
+		}
+	}
+}
+
+// Whatever validName accepts has to be safe to join onto either kind of
+// path. This is the property the whole check exists for, stated directly.
+func TestAcceptedNamesCannotEscapeEitherKindOfPath(t *testing.T) {
+	for _, name := range []string{
+		"disc.iso", "tiny11 23H2 x64.iso", "Полис.iso", "a.b.c",
+		"image (copy).iso", strings.Repeat("z", 255),
+	} {
+		if !validName(name) {
+			continue
+		}
+		if strings.ContainsAny(name, `/\`) {
+			t.Errorf("%q was accepted and contains a path separator", name)
+		}
+		if got := filepath.Join("/images", name); filepath.Dir(got) != "/images" {
+			t.Errorf("%q joins to %q, which is outside the directory", name, got)
+		}
+		// The same, spelled the way an SMB path is.
+		smb := `share\` + name
+		if strings.Count(smb, `\`) != 1 {
+			t.Errorf("%q adds a separator to an SMB path: %q", name, smb)
 		}
 	}
 }
@@ -45,10 +99,17 @@ func TestSafeNameAlwaysProducesAValidName(t *testing.T) {
 		{"../../etc/passwd", "etc-passwd"},
 		{`C:\images\disc.iso`, "C-images-disc.iso"},
 		{"  ..spaces..  ", "spaces"},
-		{"Наклейка", "fallback"},
+		// A disc labelled in Cyrillic rips to a file named in Cyrillic.
+		// The share keeps names as UTF-16 and the page sends them as
+		// UTF-8; the only thing that ever lost them was this function.
+		{"Наклейка", "Наклейка"},
+		{"Диск 2 - фильмы", "Диск-2-фильмы"},
 		{"", "fallback"},
 		{"...", "fallback"},
 		{strings.Repeat("x", 300), strings.Repeat("x", 180)},
+		// Truncation cuts on a rune boundary: half of a two-byte letter
+		// is not a name, and would not survive a round trip.
+		{strings.Repeat("я", 300), strings.Repeat("я", 90)},
 	}
 	for _, tc := range cases {
 		got := safeName(tc.in, "fallback")
@@ -183,3 +244,32 @@ type countingCloser struct{ closes int }
 
 func (c *countingCloser) Write(p []byte) (int, error) { return len(p), nil }
 func (c *countingCloser) Close() error                { c.closes++; return nil }
+
+// A header field is Latin-1 by rule, so a file named in Cyrillic cannot go
+// in filename= and arrive intact. The name has to be carried in filename*,
+// with an ASCII one beside it for anything that does not understand that.
+func TestContentDispositionCarriesNonLatinNames(t *testing.T) {
+	plain := httptest.NewRequest(http.MethodGet, "/api/drives/sr0/file?path=/x", nil)
+	if got := contentDisposition(plain, "autorun.inf"); got != `attachment; filename="autorun.inf"` {
+		t.Errorf("an ASCII name = %q, want it left alone", got)
+	}
+
+	got := contentDisposition(plain, "Наклейка.txt")
+	want := `attachment; filename="________.txt"; filename*=UTF-8''%D0%9D%D0%B0%D0%BA%D0%BB%D0%B5%D0%B9%D0%BA%D0%B0.txt`
+	if got != want {
+		t.Errorf("a Cyrillic name = %q, want %q", got, want)
+	}
+	// Whatever is in the name, the header must not be able to end the
+	// quoted string early and add parameters of its own.
+	for _, name := range []string{`a"b.iso`, "a\\b.iso", "a\rb.iso"} {
+		h := contentDisposition(plain, name)
+		if strings.Count(h, `"`) != 2 {
+			t.Errorf("contentDisposition(%q) = %q, which does not have exactly one quoted name", name, h)
+		}
+	}
+
+	inline := httptest.NewRequest(http.MethodGet, "/api/drives/sr0/file?path=/x&inline=1", nil)
+	if got := contentDisposition(inline, "clip.mp4"); !strings.HasPrefix(got, "inline;") {
+		t.Errorf("an inline request = %q, want it played rather than downloaded", got)
+	}
+}

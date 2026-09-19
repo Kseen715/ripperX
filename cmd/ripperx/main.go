@@ -54,6 +54,13 @@ type server struct {
 	store   store
 	burner  *burner
 	history *history
+	// isos is the read-only library of installer images to burn from. It is
+	// a separate store rather than another directory in the same one so
+	// that nothing can write to it by accident.
+	isos store
+	// isoFacts is what has been read out of those images already: which
+	// firmware and architecture each one boots, and the disc it needs.
+	isoFacts *factCache
 
 	uploadMax   int64
 	readSpeedKB int
@@ -98,6 +105,14 @@ func main() {
 		"settings file; ignored if it does not exist")
 	smbAddress := flag.String("smb-address", "",
 		"keep images on an SMB share instead of a local directory, as //host/share[/subdir]")
+	isoStore := flag.String("iso-store", "",
+		"a read-only library of images to burn from, as //host/share/path or a local "+
+			"directory. Nothing is ever written to it. It uses the smb-user and "+
+			"smb-password settings unless iso-store-user is set")
+	isoUser := flag.String("iso-store-user", "",
+		"user for the iso-store share, when it is not the same as smb-user")
+	isoDomain := flag.String("iso-store-domain", "",
+		"domain for the iso-store share, when it is not the same as smb-domain")
 	smbUser := flag.String("smb-user", "", "user to log in to the SMB share as")
 	smbDomain := flag.String("smb-domain", "", "domain or workgroup for the SMB login")
 	authUser := flag.String("auth-user", "",
@@ -120,7 +135,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}
-	smbPassword, authPassword, jwtSecret := "", "", ""
+	smbPassword, isoPassword, authPassword, jwtSecret := "", "", "", ""
 	if cfg != nil {
 		if err := cfg.apply(flag.CommandLine, explicitFlags(flag.CommandLine)); err != nil {
 			log.Fatal(err)
@@ -131,6 +146,7 @@ func main() {
 			}
 		}
 		smbPassword = cfg.get("smb-password")
+		isoPassword = cfg.get("iso-store-password")
 		authPassword = cfg.get("auth-password")
 		jwtSecret = cfg.get("jwt-secret")
 	}
@@ -143,6 +159,16 @@ func main() {
 	st, err := openStore(*smbAddress, *smbUser, smbPassword, *smbDomain, *out)
 	if err != nil {
 		log.Fatal(err)
+	}
+
+	// The ISO library shares the main credentials unless it was given its
+	// own, because in practice it is another folder on the same server.
+	if *isoUser == "" {
+		*isoUser, isoPassword, *isoDomain = *smbUser, smbPassword, *smbDomain
+	}
+	isos, err := openReadOnlyStore(*isoStore, *isoUser, isoPassword, *isoDomain)
+	if err != nil {
+		log.Fatalf("iso-store: %v", err)
 	}
 
 	// A history that cannot be opened is reported and then done without:
@@ -174,6 +200,8 @@ func main() {
 		drives:      newDriveSet(paths),
 		store:       st,
 		history:     hist,
+		isos:        isos,
+		isoFacts:    newFactCache(),
 		burner:      findBurner(*burnerPath),
 		uploadMax:   *uploadMax,
 		readSpeedKB: *readSpeed,
@@ -221,6 +249,9 @@ func main() {
 	log.Printf("ripperX %s", version)
 	log.Printf("drives: %s", strings.Join(paths, ", "))
 	log.Printf("images: %s", st.Describe())
+	if isos != nil {
+		log.Printf("iso library: %s (read only)", isos.Describe())
+	}
 	if hist != nil {
 		log.Printf("history: %s", hist.path)
 	} else {
@@ -351,6 +382,7 @@ type statusResponse struct {
 	AllowEject  bool   `json:"allowEject" doc:"whether the page may open and close trays"`
 	AuthOn      bool   `json:"authOn" doc:"whether a login is required"`
 	History     string `json:"history,omitempty" doc:"where scans and finished jobs are recorded, or empty when they are not"`
+	ISOStore    string `json:"isoStore,omitempty" doc:"the read-only library of images to burn from, when one is configured"`
 	UploadMax   int64  `json:"uploadMax" doc:"largest upload accepted, in bytes"`
 	ReadSpeedKB int    `json:"readSpeedKb" doc:"read speed cap applied to every rip, or 0 for the drive's own"`
 	Uptime      string `json:"uptime" doc:"how long this server has been running"`
@@ -375,6 +407,9 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.history != nil {
 		resp.History = s.history.path
+	}
+	if s.isos != nil {
+		resp.ISOStore = s.isos.Describe()
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

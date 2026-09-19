@@ -24,6 +24,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf16"
+
+	"github.com/Kseen715/ripperX/discfs"
 )
 
 // BlockSize is the logical sector of an ISO 9660 volume. Every structure in
@@ -44,46 +46,13 @@ var (
 	ErrIsDir      = errors.New("is a directory")
 )
 
-// Volume is what the disc says about itself. Every field is as recorded,
-// trimmed of the padding spaces the format insists on.
-type Volume struct {
-	VolumeID    string    `json:"volumeId"`
-	SystemID    string    `json:"systemId,omitempty"`
-	VolumeSetID string    `json:"volumeSetId,omitempty"`
-	Publisher   string    `json:"publisher,omitempty"`
-	Preparer    string    `json:"preparer,omitempty"`
-	Application string    `json:"application,omitempty"`
-	Created     time.Time `json:"created,omitzero"`
-	Modified    time.Time `json:"modified,omitzero"`
-	Sectors     int64     `json:"sectors"`
-	Bytes       int64     `json:"bytes"`
-
-	// Which naming schemes this disc carries, which is worth showing: it is
-	// the difference between a disc whose names survive a copy and one whose
-	// names were flattened to 8.3 by its author.
-	Joliet    bool `json:"joliet"`
-	RockRidge bool `json:"rockRidge"`
-}
-
-// Entry is one file or directory. Path is always absolute within the disc
-// and always uses forward slashes, whatever the disc was mastered on.
-type Entry struct {
-	Name    string    `json:"name"`
-	Path    string    `json:"path"`
-	IsDir   bool      `json:"isDir"`
-	Size    int64     `json:"size"`
-	ModTime time.Time `json:"modTime,omitzero"`
-	// Extent is the first sector of the file's contents. Shown because on a
-	// scratched disc it is what says where in the disc a failure was.
-	Extent int64 `json:"extent"`
-	// Mode and SymlinkTarget come from Rock Ridge, and are empty on a disc
-	// that has none.
-	Mode          uint32 `json:"mode,omitempty"`
-	SymlinkTarget string `json:"symlinkTarget,omitempty"`
-	// ISOName is the plain 8.3 name, kept so a file can still be found by
-	// the name a non-Joliet reader would show.
-	ISOName string `json:"isoName,omitempty"`
-}
+// Volume and Entry are the shared vocabulary: an ISO 9660 volume and a UDF
+// one describe the same things, and the browse, rip and play paths are
+// written once against both.
+type (
+	Volume = discfs.Volume
+	Entry  = discfs.Entry
+)
 
 // FS is an opened volume. It holds no state beyond the volume descriptor and
 // the reader, so several requests may walk it at once.
@@ -156,6 +125,7 @@ func OpenSession(r io.ReaderAt, startSector int64) (*FS, error) {
 		fs.joliet = true
 	}
 	fs.vol = primary.volume()
+	fs.vol.Format = "ISO 9660"
 	fs.vol.Joliet = supplementary != nil
 	if fs.joliet {
 		// The Joliet descriptor holds the same identifiers in UCS-2, and
@@ -499,7 +469,7 @@ func (d dirRec) entry(full string) Entry {
 // Open returns the contents of one file. The result reads straight off the
 // disc: nothing is buffered up front, so opening a 600 MB file costs
 // nothing and a Range request for the middle of it seeks there directly.
-func (f *FS) Open(p string) (*io.SectionReader, Entry, error) {
+func (f *FS) Open(p string) (discfs.File, Entry, error) {
 	rec, err := f.find(p)
 	if err != nil {
 		return nil, Entry{}, err

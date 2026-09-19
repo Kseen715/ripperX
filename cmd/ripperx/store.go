@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/hirochachacha/go-smb2"
 	"golang.org/x/sys/unix"
@@ -26,21 +28,38 @@ import (
 // user-supplied path onto a directory.
 
 // validName reports whether name is a plain file name, safe to join onto a
-// local directory or an SMB path. The checks that look sufficient are not:
-// filepath.Base only splits on the separator of the machine ripperX runs
-// on, so on Linux it happily passes `..\..\secret.iso` straight through to
-// the backslash-separated path an SMB share uses. So the rule is an
-// allowlist rather than a search for the traversal of the day.
+// local directory or an SMB path.
+//
+// The checks that look sufficient are not: filepath.Base only splits on the
+// separator of the machine ripperX runs on, so on Linux it happily passes
+// `..\..\secret.iso` straight through to the backslash-separated path an SMB
+// share uses. So both separators are refused by name, along with the two
+// traversal names, the control characters, and the colon that would name an
+// alternate data stream on a Windows server.
+//
+// What is deliberately allowed is everything else - spaces, accents, any
+// script. This was an allowlist of ASCII letters and digits, which is right
+// for names ripperX invents and wrong for a directory of files it did not:
+// a shelf of installer images includes "tiny11 23H2 x64.iso", and refusing
+// to list a file is not a security property, it is a file nobody can burn.
+// Names ripperX creates still go through safeName and stay tidy.
 func validName(name string) bool {
-	if name == "" || len(name) > 200 || strings.HasPrefix(name, ".") {
+	if name == "" || len(name) > 255 {
+		return false
+	}
+	// "." and ".." are directories, and a leading dot is a hidden file that
+	// has no business being offered as a disc image.
+	if strings.HasPrefix(name, ".") {
 		return false
 	}
 	for _, r := range name {
 		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-		case r == '.', r == '-', r == '_', r == '+':
-		default:
-			return false
+		case r == '/', r == '\\':
+			return false // a path separator on one system or the other
+		case r == ':':
+			return false // an alternate data stream on a Windows server
+		case r < 0x20, r == 0x7f:
+			return false // control characters, including NUL
 		}
 	}
 	return true
@@ -50,16 +69,30 @@ func validName(name string) bool {
 // file name typed by a user - into a name validName accepts, without ever
 // producing an empty one. It is applied to every name ripperX invents and
 // to every name a client supplies.
+//
+// Letters and digits of any script are kept. A disc labelled in Cyrillic
+// should rip to a file named in Cyrillic: the share stores names as UTF-16
+// and the page sends them as UTF-8, so the only thing that ever lost them
+// was this function insisting on ASCII. What is replaced is punctuation and
+// whitespace, which is about what a file name can hold rather than about
+// which alphabet it is in.
 func safeName(name string, fallback string) string {
 	name = strings.TrimSpace(name)
 	var b strings.Builder
 	lastDash := false
 	for _, r := range name {
 		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
-			r == '.', r == '-', r == '_', r == '+':
+		case unicode.IsLetter(r), unicode.IsDigit(r),
+			r == '.', r == '_', r == '+':
 			b.WriteRune(r)
 			lastDash = false
+		case r == '-':
+			// A dash is kept, and counts as one: " - " between two words
+			// is one separator however it was typed.
+			if !lastDash && b.Len() > 0 {
+				b.WriteByte('-')
+				lastDash = true
+			}
 		default:
 			// Runs of anything else collapse into a single dash, so
 			// "Windows 98  SE" does not become "Windows-98--SE".
@@ -70,9 +103,12 @@ func safeName(name string, fallback string) string {
 		}
 	}
 	out := strings.Trim(b.String(), "-.")
-	if len(out) > 180 {
-		out = out[:180]
+	// Cut on a rune boundary: half of a two-byte letter is not a name.
+	for len(out) > 180 {
+		_, size := utf8.DecodeLastRuneInString(out)
+		out = out[:len(out)-size]
 	}
+	out = strings.Trim(out, "-.")
 	if !validName(out) {
 		return fallback
 	}
@@ -457,3 +493,72 @@ func (s *smbStore) Kind() string { return "smb" }
 // share's quota and its underlying filesystem often disagree, and a wrong
 // "no room" refusing a rip is worse than no figure at all.
 func (s *smbStore) FreeBytes() (int64, bool) { return 0, false }
+
+// readOnlyStore is a store that refuses to be written to. It wraps the ISO
+// library: a directory of installer images that ripperX burns from and must
+// never put anything into or take anything out of.
+//
+// The refusal is structural rather than a convention, because a convention
+// is one forgotten call away from deleting somebody's Windows ISO.
+type readOnlyStore struct{ store }
+
+var errReadOnlyStore = errors.New("this is a read-only library; nothing can be written to it")
+
+func (readOnlyStore) Create(string) (io.WriteCloser, error) { return nil, errReadOnlyStore }
+func (readOnlyStore) Remove(string) error                   { return errReadOnlyStore }
+
+// FreeBytes is meaningless for a library nothing is written to.
+func (readOnlyStore) FreeBytes() (int64, bool) { return 0, false }
+
+// localPath is deliberately not forwarded: the burner is handed a path only
+// through stageImage, which asks the writable store. Forwarding it would
+// let a caller reach the underlying directory and write there.
+
+// openReadOnlyStore opens the ISO library. The address is an SMB path when
+// it looks like one and a local directory otherwise, so the same setting
+// serves a share and a folder.
+func openReadOnlyStore(address, user, password, domain string) (store, error) {
+	if address == "" {
+		return nil, nil
+	}
+	if !looksLikeSMB(address) {
+		local, err := newLocalStore(address)
+		if err != nil {
+			return nil, err
+		}
+		return readOnlyStore{local}, nil
+	}
+	st, err := newSMBStore(address, user, password, domain)
+	if err != nil {
+		return nil, err
+	}
+	if err := st.check(); err != nil {
+		return nil, err
+	}
+	return readOnlyStore{st}, nil
+}
+
+func looksLikeSMB(address string) bool {
+	return strings.HasPrefix(address, "//") ||
+		strings.HasPrefix(address, `\\`) ||
+		strings.HasPrefix(address, "smb:")
+}
+
+// seekReaderAt presents a seekable file as a ReaderAt, which is what the
+// filesystem and boot readers take. It is not safe for concurrent use -
+// there is one file position and it moves - so it is for one caller
+// reading one image at a time, which is what inspecting an image is.
+type seekReaderAt struct{ rs io.ReadSeeker }
+
+func (s seekReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	if _, err := s.rs.Seek(off, io.SeekStart); err != nil {
+		return 0, err
+	}
+	n, err := io.ReadFull(s.rs, p)
+	// ReadAt's contract is io.EOF for a short read; ReadFull says
+	// ErrUnexpectedEOF for the same thing.
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		err = io.EOF
+	}
+	return n, err
+}

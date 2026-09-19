@@ -188,6 +188,74 @@
   .check { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-2);
     text-transform: none; letter-spacing: 0; }
 
+  /* The image picker.
+     A <select> can show one line of text, and choosing which disc to spend
+     turns on four things at once: what the image is, which firmware it
+     boots, which processor, and the smallest disc it fits on. None of that
+     fits on a line, and none of it is in the file name. So the menu is
+     drawn rather than borrowed - and it is still a listbox, with the
+     keyboard and the labels a <select> would have had. */
+  .picker { position: relative; }
+  .pick-btn {
+    display: flex; align-items: center; gap: 10px; width: 100%;
+    min-width: 280px; max-width: 460px; text-align: left; padding: 6px 22px 6px 9px;
+  }
+  .pick-btn .pick-name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pick-btn .pick-none { color: var(--muted); }
+  /* The button's corner mark is the only one on the page that means
+     "opens": it points down, and it turns over when the menu is open. */
+  .pick-btn::after {
+    background: linear-gradient(to bottom right, transparent 0 50%, currentColor 50%);
+    width: 8px; height: 8px; top: auto; bottom: 4px; right: 4px; opacity: .55;
+  }
+  .picker.open .pick-btn::after { background: linear-gradient(to top right, transparent 0 50%, currentColor 50%); }
+
+  .pick-pop {
+    position: absolute; z-index: 30; top: calc(100% + 4px); left: 0;
+    min-width: 100%; width: max(100%, 460px); max-width: 92vw;
+    border: 1px solid var(--line); background: var(--panel);
+  }
+  .pick-search {
+    font: inherit; font-size: 13px; width: 100%; padding: 8px 10px;
+    background: var(--sunken); color: var(--ink);
+    border: 0; border-bottom: 1px solid var(--line);
+  }
+  .pick-search:focus-visible { outline: 2px solid var(--ink); outline-offset: -2px; }
+  .pick-list { max-height: 320px; overflow: auto; }
+  .pick-opt {
+    display: block; width: 100%; text-align: left; padding: 7px 10px;
+    border: 0; border-bottom: 1px solid var(--hair); background: none; cursor: pointer;
+  }
+  .pick-opt::after { display: none; }
+  .pick-opt:last-child { border-bottom: 0; }
+  .pick-opt:hover, .pick-opt.here { background: var(--sunken); }
+  /* The chosen one is marked at its edge, so it is still obvious when it is
+     also the row under the cursor. */
+  .pick-opt[aria-selected=true] { border-left: 4px solid var(--accent); padding-left: 6px; }
+  .pick-opt .pick-top { display: flex; gap: 8px; align-items: baseline; }
+  .pick-opt .pick-file { flex: 1 1 auto; font-size: 13px; word-break: break-all; }
+  .pick-opt .pick-size { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .pick-opt .pick-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+  .pick-empty { margin: 0; padding: 10px; font-size: 12px; color: var(--muted); }
+
+  /* A tag is one fact about an image. Grayscale, told apart by weight and
+     by hatching, so none of this depends on seeing colour. */
+  .tag-x {
+    font-size: 10px; letter-spacing: .1em; text-transform: uppercase;
+    border: 1px solid var(--hair); padding: 1px 5px; color: var(--ink-2); white-space: nowrap;
+  }
+  .tag-x.fw { border-color: var(--ink-2); font-weight: 700; }
+  .tag-x.arch { color: var(--ink); border-style: dashed; }
+  .tag-x.disc { color: var(--muted); }
+  .tag-x.bad {
+    border-color: var(--line); color: var(--ink);
+    background: repeating-linear-gradient(45deg, transparent 0 5px, var(--hair) 5px 6px);
+  }
+
+  /* A label that is not a <label>, because it names a group rather than one
+     control; it has to look identical to the ones beside it. */
+  .label-as { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .1em; }
+
   audio { width: 100%; max-width: 360px; height: 34px; }
 
   @media (max-width: 720px) {
@@ -291,8 +359,29 @@
           <div id="burnFields" hidden>
             <div class="fields">
               <span class="field">
-                <label for="burnImage">Image</label>
-                <select id="burnImage"></select>
+                <label for="burnSource">From</label>
+                <select id="burnSource">
+                  <option value="images">the image store</option>
+                  <option value="isos">the ISO library</option>
+                </select>
+              </span>
+              <span class="field">
+                <span class="label-as" id="burnImageLabel">Image</span>
+                <div class="picker" id="burnPicker">
+                  <button type="button" id="burnPick" class="pick-btn" aria-haspopup="listbox"
+                          aria-expanded="false" aria-labelledby="burnImageLabel burnPick"></button>
+                  <div class="pick-pop" id="burnPop" hidden>
+                    <input type="search" id="burnFilter" class="pick-search" autocomplete="off"
+                           placeholder="Filter by name, firmware or architecture"
+                           aria-label="Filter the images">
+                    <div class="pick-list" id="burnList" role="listbox"
+                         aria-labelledby="burnImageLabel"></div>
+                    <p class="pick-empty" id="burnEmpty" hidden></p>
+                  </div>
+                </div>
+                <!-- The chosen name lives here, so everything that reads the
+                     form reads one field whatever the menu looks like. -->
+                <select id="burnImage" hidden></select>
               </span>
               <span class="field">
                 <label for="burnSpeed">Write at</label>
@@ -312,6 +401,7 @@
               <button id="btnBurn" class="primary">Burn</button>
               <button id="btnErase" hidden>Erase this disc</button>
             </div>
+            <p id="burnBoot" class="note" hidden style="margin:10px 0 0"></p>
             <p class="muted" id="burnHint" style="font-size:12px;margin:10px 0 0"></p>
           </div>
         </fieldset>
@@ -458,6 +548,9 @@
   <form method="dialog" class="body">
     <h2 id="archiveTitle">Download archive</h2>
     <p class="muted" id="archiveWhat" style="font-size:12px;margin:0"></p>
+    <p class="label-as" style="margin:12px 0 0">Where it goes</p>
+    <div class="fmt" id="archiveWhere"></div>
+    <p class="label-as" style="margin:0">Archive as</p>
     <div class="fmt" id="archiveFormats"></div>
     <div class="row" style="justify-content:flex-end">
       <button value="cancel">Cancel</button>

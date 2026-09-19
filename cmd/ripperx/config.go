@@ -14,7 +14,7 @@ import (
 // command-line flag: a password or a signing key passed as an argument is
 // readable by every user on the machine through /proc. Each is also checked
 // against the file's permissions before it is used.
-var secretKeys = []string{"smb-password", "auth-password", "jwt-secret"}
+var secretKeys = []string{"smb-password", "iso-store-password", "auth-password", "jwt-secret"}
 
 var configOnlyKeys = func() map[string]bool {
 	m := map[string]bool{}

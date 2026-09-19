@@ -261,6 +261,24 @@ func (s *server) routes(guard *auth) []route {
 		Extra: []string{http.MethodDelete},
 		Other: []status{{http.StatusNotFound, "no image by that name"}},
 	}, {
+		Method: http.MethodGet, Pattern: "/api/isos", Handler: s.handleISOs,
+		Summary: "The read-only library of images to burn from",
+		Desc: "A second location - usually a share of installer images - that ripperX " +
+			"burns from and never writes to. Refusing to write to it is structural rather " +
+			"than a convention. Empty when none is configured.",
+		Resp: libraryResponse{},
+	}, {
+		Method: http.MethodGet, Pattern: "/api/imageinfo", Handler: s.handleImageInfo,
+		Summary: "What an image is, before a disc is spent on it",
+		Desc: "Whether it is really an ISO 9660 image, what its volume calls itself, the " +
+			"smallest disc it will fit on, and whether a disc written from it will boot - " +
+			"and on which firmware. That last is the one question nobody can answer by " +
+			"looking at the file, and a disk image meant for a USB stick is the same shape " +
+			"as an ISO and fails silently.",
+		Param: &param{"name", "the file, as the name query parameter; source picks the library"},
+		Resp:  imageInfoResponse{},
+		Other: []status{{http.StatusNotFound, "no image by that name"}},
+	}, {
 		Method: http.MethodPost, Pattern: "/api/upload", Handler: s.handleUpload,
 		Summary: "Put an image into the store",
 		Desc: "A multipart form with one file in it, which is what a plain file input and " +

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Kseen715/ripperX/discfs"
 	"github.com/Kseen715/ripperX/iso9660"
 	"github.com/Kseen715/ripperX/mmc"
 )
@@ -499,7 +500,7 @@ func (p filePlan) label(driveID string) string {
 	return fmt.Sprintf("%d files from %s", len(p.files), driveID)
 }
 
-func planFiles(fsys *iso9660.FS, paths []string) (filePlan, error) {
+func planFiles(fsys discfs.FS, paths []string) (filePlan, error) {
 	var plan filePlan
 	seen := map[string]bool{}
 	add := func(e iso9660.Entry) {
@@ -537,7 +538,7 @@ func planFiles(fsys *iso9660.FS, paths []string) (filePlan, error) {
 // fsys is passed in rather than fetched here: by the time this runs the job
 // holds the drive, and reading the volume descriptors would be refused as a
 // borrow of a drive that is in use.
-func (s *server) ripFiles(ctx context.Context, rec *jobRecord, d *drive, base string, fsys *iso9660.FS, plan filePlan, format archiveFormat, speedKB int) error {
+func (s *server) ripFiles(ctx context.Context, rec *jobRecord, d *drive, base string, fsys discfs.FS, plan filePlan, format archiveFormat, speedKB int) error {
 	if err := s.checkRoom(plan.bytes); err != nil {
 		return err
 	}

@@ -36,7 +36,8 @@ service account is in the `cdrom` group.
   compared — it is recognised by a fingerprint of its table of contents and
   volume, not by its name.
 - **Browses the disc** without mounting it, reading the directory records
-  where they lie. Joliet and Rock Ridge names are used where the disc has
+  where they lie — **ISO 9660 or UDF**, whichever the disc has. Joliet and
+  Rock Ridge names are used where the disc has
   them, so what you see is what the disc's author saw rather than the 8.3
   version.
 - **Downloads a folder as one archive** — zip, tar, tar.gz, tar.bz2 or
@@ -61,6 +62,15 @@ service account is in the `cdrom` group.
   seeing what was on it before anything was added.
 - **Opens and closes the trays** from the page, so a machine in another room
   is still usable.
+- **Burns from a read-only library.** A second location — a folder of
+  installer ISOs that something else maintains — can be configured as a
+  source. ripperX burns from it and can never write to it: the refusal is
+  structural, not a convention.
+- **Says whether a disc will boot, before you spend one.** It reads the
+  image's El Torito boot record and reports which firmware it caters for —
+  PC BIOS, UEFI, both — and refuses to burn a file that is a whole number of
+  sectors but is not an ISO at all, which is what a disk image meant for a
+  USB stick looks like from the outside.
 - **Keeps images** in a flat directory, either local or on an SMB share
   ripperX talks to itself. Upload to it from the browser, download from it,
   delete, and convert a raw `.img` to a burnable `.iso`.
@@ -140,7 +150,9 @@ Three packages:
 | | |
 | --- | --- |
 | [`mmc`](mmc/) | the drive itself: capabilities, disc and track information, data and raw reads, sense decoding, tray and speed control |
-| [`iso9660`](iso9660/) | the filesystem on a data disc, read without mounting it: ISO 9660 with Joliet and Rock Ridge |
+| [`discfs`](discfs/) | what a disc's filesystem looks like from outside, so browsing, ripping and playing are written once for both formats |
+| [`iso9660`](iso9660/) | ISO 9660 with Joliet and Rock Ridge, read without mounting it, plus the El Torito boot record |
+| [`udf`](udf/) | UDF, which is what a DVD-Video, a game disc and most DVDs written this century actually carry |
 | [`cmd/ripperx`](cmd/ripperx/) | the server, the jobs, the health scan, the history database, the image store and the web UI |
 
 **Writing a disc is the one thing ripperX does not do itself.** Getting
@@ -221,6 +233,56 @@ disc dominates them.
 Scan two years apart and `/api/discs` says which way each disc is going, in
 words.
 
+### Will a burned disc boot?
+
+Yes, for a real ISO. An image that boots carries an El Torito boot record,
+and everything it points at lives inside the image; writing the image
+sector-for-sector — which is what `-sao -data` does — preserves all of it.
+Both BIOS and UEFI boot paths on a modern installer image are inside the
+ISO, so both survive.
+
+Two things are worth checking first, and ripperX checks them:
+
+- **Is it actually an ISO?** A disk image meant for a USB stick is also a
+  whole number of 2048-byte sectors and passes every other test. Burned to
+  a disc it produces a coaster that looks like a success. ripperX refuses
+  it, by name, before the laser is switched on.
+- **Which firmware, and which processor?** `/api/imageinfo` and the image
+  library read the boot catalogue and the bootloaders themselves, and say.
+  A Windows XP image reports PC BIOS only; a Windows 11 ARM64 image reports
+  UEFI and `aarch64`; a current Linux installer reports both firmwares and
+  usually `i386` and `x86_64`. If nothing in the catalogue is marked
+  bootable it says that too.
+
+  The architecture comes out of the bootloader, not out of the file name.
+  Most Linux installers keep theirs at `/EFI/BOOT` in the ISO 9660 tree,
+  where the PE machine type can simply be read. Every Windows install image
+  is a UDF bridge disc whose ISO 9660 tree holds a readme and nothing else —
+  for those the only copy is inside the El Torito boot image, which is a
+  small FAT filesystem, so that is read too.
+
+The other limit is capacity, which has nothing to do with ripperX: a
+current desktop installer is 5–7 GB and needs a dual-layer DVD, not the
+4.7 GB single layer. `/api/imageinfo` names the smallest disc that will fit.
+
+### Discs with no ISO 9660 on them
+
+A great many discs carry no ISO 9660 at all. Every DVD-Video, most game
+discs and anything Windows wrote since XP is UDF, and some are bridged —
+both filesystems describing the same files — while many are not. A reader
+that knows only ISO 9660 says "there is no filesystem on this disc" about a
+disc that is full of files.
+
+So ripperX reads both. ISO 9660 is tried first, because on a bridged disc it
+is the side that brings Joliet and Rock Ridge with it; UDF is read when
+there is no ISO 9660. UDF names are Unicode, which is why a disc labelled in
+Cyrillic keeps its names, and a UDF file can be scattered across the disc in
+several pieces, which is handled where an ISO 9660 file never needs it.
+
+Reading is implemented, not writing: the virtual and sparable partition maps
+that packet-written rewritable media use belong to a disc being written a
+block at a time, which is not a disc anyone is ripping.
+
 ### Appending
 
 A disc reports how much room it has left and whether anything more can be
@@ -296,6 +358,13 @@ curl -s 'localhost:8080/api/drives/sr0/file?path=/README.TXT'
 
 # a whole directory as one archive, produced as the disc is read
 curl -s 'localhost:8080/api/drives/sr0/archive?path=/docs&format=tar.xz' | tar tJvf -
+
+# what an image is, and whether a disc made from it will boot
+curl -s 'localhost:8080/api/imageinfo?name=debian-13.6.0-amd64-netinst.iso&source=isos'
+
+# burn it, from the read-only library
+curl -s -XPOST localhost:8080/api/burn -H 'Content-Type: application/json' \
+     -d '{"drive":"sr0","image":"debian-13.6.0-amd64-netinst.iso","source":"isos"}'
 
 # check the disc's condition, and see how it compares with last time
 curl -s -XPOST localhost:8080/api/scan -H 'Content-Type: application/json' \

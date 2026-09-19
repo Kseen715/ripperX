@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Kseen715/ripperX/iso9660"
 	"github.com/Kseen715/ripperX/mmc"
 )
 
@@ -108,7 +109,10 @@ func (b *burner) blankArgs(dev string, full bool) []string {
 
 type burnRequest struct {
 	Drive string `json:"drive" doc:"which drive, by its id"`
-	Image string `json:"image" doc:"the image in the store to write"`
+	Image string `json:"image" doc:"the image to write"`
+	// Source is which library the image is in: the writable store where
+	// rips land, or the read-only one of installer images.
+	Source string `json:"source,omitempty" doc:"images (the default) or isos, the read-only library"`
 	// SpeedX is a multiple of the disc's 1x, which is what burner programs
 	// take. 0 lets the drive choose, which is usually its fastest.
 	SpeedX int `json:"speedX,omitempty" doc:"write speed as a multiple of 1x; 0 lets the drive decide"`
@@ -121,6 +125,11 @@ type burnRequest struct {
 	Eject  bool  `json:"eject,omitempty" doc:"open the tray when everything is finished"`
 }
 
+// handleBurn checks the request before it checks the disc. The order
+// matters to whoever is standing at the drive: everything wrong with the
+// request is theirs to fix at the keyboard, and being told "there is no
+// disc" first means finding a blank, putting it in, and only then learning
+// that the file chosen was never an image at all.
 func (s *server) handleBurn(w http.ResponseWriter, r *http.Request) {
 	var req burnRequest
 	if err := decodeJSON(w, r, &req); err != nil {
@@ -132,6 +141,43 @@ func (s *server) handleBurn(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, errorResponse{Error: err.Error()})
 		return
 	}
+	src, err := s.sourceStore(req.Source)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+	if !validName(req.Image) {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: errBadName.Error()})
+		return
+	}
+	f, info, err := src.Open(req.Image)
+	if err != nil {
+		code := http.StatusInternalServerError
+		if errors.Is(err, errNoSuchImage) {
+			code = http.StatusNotFound
+		}
+		writeJSON(w, code, errorResponse{Error: err.Error()})
+		return
+	}
+	// Whether the disc will boot is the one thing nobody can tell by
+	// looking at the file, and a disk image meant for a USB stick is the
+	// same length and the same shape as an ISO.
+	boot, bootErr := iso9660.ReadBootInfo(seekReaderAt{f})
+	f.Close()
+	if errors.Is(bootErr, iso9660.ErrNotISO9660) {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: fmt.Sprintf(
+			"%s is a whole number of sectors but is not an ISO 9660 image. Burning it "+
+				"would produce a disc nothing can read or boot; if it is a disk image "+
+				"meant for a USB stick, a disc is not where it goes.", req.Image)})
+		return
+	}
+	if info.Size == 0 || info.Size%mmc.SectorData != 0 {
+		writeJSON(w, http.StatusBadRequest, errorResponse{
+			Error: sectorComplaint(info)})
+		return
+	}
+
+	// Now the disc, which is the part that can be fixed by swapping it.
 	caps, disc, err := d.state(2 * time.Second)
 	if err != nil {
 		writeErr(w, http.StatusServiceUnavailable, err)
@@ -141,17 +187,6 @@ func (s *server) handleBurn(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, errorResponse{Error: why})
 		return
 	}
-	if !validName(req.Image) {
-		writeJSON(w, http.StatusBadRequest, errorResponse{Error: errBadName.Error()})
-		return
-	}
-	f, info, err := s.store.Open(req.Image)
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorResponse{Error: err.Error()})
-		return
-	}
-	f.Close()
-
 	if err := checkImageFits(info, disc); err != nil {
 		writeJSON(w, http.StatusConflict, errorResponse{Error: err.Error()})
 		return
@@ -176,9 +211,13 @@ func (s *server) handleBurn(w http.ResponseWriter, r *http.Request) {
 	if verify {
 		total *= 2
 	}
+
 	job, err := s.jobs.startOnDrive(d, "burn", label, total,
 		func(ctx context.Context, rec *jobRecord) error {
-			return s.burn(ctx, rec, d, info, req, verify)
+			if boot != nil {
+				rec.say("%s", upperFirst(boot.Summary()))
+			}
+			return s.burn(ctx, rec, d, src, info, req, verify)
 		})
 	if err != nil {
 		writeJSON(w, http.StatusConflict, errorResponse{Error: err.Error()})
@@ -187,20 +226,26 @@ func (s *server) handleBurn(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, ripResponse{Job: *job})
 }
 
+// sectorComplaint says why a file is not a disc image, and says the useful
+// thing when it is a raw one.
+func sectorComplaint(info storedFile) string {
+	if info.Size == 0 {
+		return info.Name + " is empty"
+	}
+	hint := ""
+	if info.Size%mmc.SectorRaw == 0 {
+		hint = "; it looks like a raw 2352-byte image - convert it to an .iso first"
+	}
+	return fmt.Sprintf("%s is %d bytes, which is not a whole number of 2048-byte sectors%s",
+		info.Name, info.Size, hint)
+}
+
 // checkImageFits is the check that saves discs. An image whose length is
 // not a whole number of 2048-byte sectors is not a disc image at all, and
 // one larger than the disc runs out of room several minutes into a burn.
 func checkImageFits(info storedFile, disc *mmc.Disc) error {
-	if info.Size == 0 {
-		return fmt.Errorf("%s is empty", info.Name)
-	}
-	if info.Size%mmc.SectorData != 0 {
-		hint := ""
-		if info.Size%mmc.SectorRaw == 0 {
-			hint = "; it looks like a raw 2352-byte image - convert it to an .iso first"
-		}
-		return fmt.Errorf("%s is %d bytes, which is not a whole number of 2048-byte sectors%s",
-			info.Name, info.Size, hint)
+	if info.Size == 0 || info.Size%mmc.SectorData != 0 {
+		return errors.New(sectorComplaint(info))
 	}
 	capacity := disc.BlankSectors
 	if capacity == 0 {
@@ -213,7 +258,7 @@ func checkImageFits(info storedFile, disc *mmc.Disc) error {
 	return nil
 }
 
-func (s *server) burn(ctx context.Context, rec *jobRecord, d *drive, info storedFile, req burnRequest, verify bool) error {
+func (s *server) burn(ctx context.Context, rec *jobRecord, d *drive, src store, info storedFile, req burnRequest, verify bool) error {
 	if s.burner == nil {
 		return errors.New("no burner program is installed")
 	}
@@ -223,7 +268,7 @@ func (s *server) burn(ctx context.Context, rec *jobRecord, d *drive, info stored
 	// network at the speed the laser demands is how a buffer underrun
 	// happens, so this is the right thing to do even where it would work.
 	rec.setPhase("preparing")
-	imagePath, cleanup, err := s.stageImage(ctx, rec, info)
+	imagePath, cleanup, err := s.stageImage(ctx, rec, src, info)
 	if cleanup != nil {
 		defer cleanup()
 	}
@@ -279,13 +324,13 @@ func (s *server) burn(ctx context.Context, rec *jobRecord, d *drive, info stored
 // one; anything else is copied to a temporary file, which is also the point
 // at which a share that has gone away is discovered - before the disc is
 // spoiled rather than in the middle of writing it.
-func (s *server) stageImage(ctx context.Context, rec *jobRecord, info storedFile) (string, func(), error) {
-	if local, ok := s.store.(*localStore); ok {
+func (s *server) stageImage(ctx context.Context, rec *jobRecord, from store, info storedFile) (string, func(), error) {
+	if local, ok := from.(*localStore); ok {
 		if p, ok := local.localPath(info.Name); ok {
 			return p, nil, nil
 		}
 	}
-	src, _, err := s.store.Open(info.Name)
+	src, _, err := from.Open(info.Name)
 	if err != nil {
 		return "", nil, err
 	}
@@ -299,7 +344,7 @@ func (s *server) stageImage(ctx context.Context, rec *jobRecord, info storedFile
 		tmp.Close()
 		_ = os.Remove(tmp.Name())
 	}
-	rec.say("copying %s from %s before writing", info.Name, s.store.Describe())
+	rec.say("copying %s from %s before writing", info.Name, from.Describe())
 	if _, err := copyCtx(ctx, tmp, src, info.Size); err != nil {
 		cleanup()
 		return "", nil, err

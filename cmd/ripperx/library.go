@@ -12,8 +12,10 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/Kseen715/ripperX/iso9660"
 	"github.com/Kseen715/ripperX/mmc"
 )
 
@@ -24,10 +26,13 @@ import (
 // same names and the same validation.
 
 type libraryResponse struct {
-	Files []storedFile `json:"files" doc:"every image in the store, newest first"`
-	Store string       `json:"store" doc:"where they are, with no password in it"`
-	Kind  string       `json:"kind" doc:"local or smb"`
-	Free  int64        `json:"free,omitempty" doc:"bytes free where images are written, when that can be established"`
+	Files []libraryFile `json:"files" doc:"every image in the store, newest first"`
+	Store string        `json:"store" doc:"where they are, with no password in it"`
+	Kind  string        `json:"kind" doc:"local or smb"`
+	Free  int64         `json:"free,omitempty" doc:"bytes free where images are written, when that can be established"`
+	// ReadOnly marks the library nothing can be written to, so a page does
+	// not offer a delete button it would only be refused for.
+	ReadOnly bool `json:"readOnly,omitempty" doc:"true for the read-only image library"`
 }
 
 func (s *server) handleLibrary(w http.ResponseWriter, r *http.Request) {
@@ -36,12 +41,7 @@ func (s *server) handleLibrary(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	// An empty store is an empty list, never a null: a client that has to
-	// special-case the absence of a field is a client that will forget to.
-	if files == nil {
-		files = []storedFile{}
-	}
-	resp := libraryResponse{Files: files, Store: s.store.Describe(), Kind: s.store.Kind()}
+	resp := libraryResponse{Files: plainFiles(files), Store: s.store.Describe(), Kind: s.store.Kind()}
 	if free, ok := s.store.FreeBytes(); ok {
 		resp.Free = free
 	}
@@ -320,4 +320,294 @@ func userData(sector []byte) ([]byte, bool) {
 		return sector[24 : 24+mmc.SectorData], true
 	}
 	return nil, false
+}
+
+// Two places an image can come from: the writable store, where rips land
+// and uploads go, and the read-only library of installer images. A request
+// names which, and a request that names neither means the writable one -
+// which is what every client written before the library existed sends.
+const (
+	sourceImages = "images"
+	sourceISOs   = "isos"
+)
+
+var errNoISOStore = errors.New("this server has no read-only image library configured")
+
+// sourceStore picks the store a request means.
+func (s *server) sourceStore(name string) (store, error) {
+	switch name {
+	case "", sourceImages:
+		return s.store, nil
+	case sourceISOs:
+		if s.isos == nil {
+			return nil, errNoISOStore
+		}
+		return s.isos, nil
+	}
+	return nil, fmt.Errorf("no such image source %q; it is %s or %s", name, sourceImages, sourceISOs)
+}
+
+func (s *server) handleISOs(w http.ResponseWriter, r *http.Request) {
+	if s.isos == nil {
+		writeJSON(w, http.StatusOK, libraryResponse{Files: []libraryFile{}, Kind: "none"})
+		return
+	}
+	files, err := s.isos.List()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, libraryResponse{
+		Files:    s.isoFacts.fill(r.Context(), s.isos, files),
+		Store:    s.isos.Describe(),
+		Kind:     s.isos.Kind(),
+		ReadOnly: true,
+	})
+}
+
+// Disc capacities, for saying which disc an image needs rather than leaving
+// someone to find out when a 6 GB image will not fit a 4.7 GB blank.
+const (
+	capacityCD80  = 737280000  // an 80-minute CD-R
+	capacityDVD   = 4700372992 // single layer
+	capacityDVDDL = 8547991552 // dual layer
+)
+
+// discNeeded says the smallest disc this image will fit on.
+func discNeeded(size int64) string {
+	switch {
+	case size <= capacityCD80:
+		return "CD"
+	case size <= capacityDVD:
+		return "DVD"
+	case size <= capacityDVDDL:
+		return "dual-layer DVD"
+	default:
+		return "nothing this drive writes"
+	}
+}
+
+// libraryFile is one image in a library, and - where it is worth the read -
+// what is inside it.
+//
+// Choosing which disc to spend is choosing between an image that boots on
+// the machine in front of you and one that does not, and that is not in the
+// file name: half a shelf of installer images is named after a version and
+// nothing else. So the ISO library fills these in. The image store does
+// not, because there a listing would mean opening every rip on every page
+// load to learn nothing anyone asked for.
+type libraryFile struct {
+	storedFile
+	Sectors int64             `json:"sectors,omitempty" doc:"how many 2048-byte sectors it is"`
+	Aligned bool              `json:"aligned,omitempty" doc:"whether it is a whole number of sectors, which a disc image always is"`
+	Needs   string            `json:"needs,omitempty" doc:"the smallest disc it will fit on"`
+	Volume  string            `json:"volume,omitempty" doc:"what the ISO 9660 volume calls itself"`
+	Boot    *iso9660.BootInfo `json:"boot,omitempty" doc:"which firmware and which architectures a disc written from it will boot"`
+	Summary string            `json:"summary,omitempty" doc:"one line about this image, for a person"`
+	Error   string            `json:"error,omitempty" doc:"why the image could not be read as one"`
+}
+
+// plainFiles lists files without looking inside them. An empty store is an
+// empty list, never a null: a client that has to special-case the absence
+// of a field is a client that will forget to.
+func plainFiles(files []storedFile) []libraryFile {
+	out := make([]libraryFile, 0, len(files))
+	for _, f := range files {
+		out = append(out, describeSize(f))
+	}
+	return out
+}
+
+// describeSize fills in what the size alone says: whether the file could be
+// a disc image at all, and the smallest disc it would fit on. It costs no
+// reads, so every listing gets it.
+func describeSize(f storedFile) libraryFile {
+	return libraryFile{
+		storedFile: f,
+		Sectors:    f.Size / mmc.SectorData,
+		Aligned:    f.Size > 0 && f.Size%mmc.SectorData == 0,
+		Needs:      discNeeded(f.Size),
+	}
+}
+
+type imageInfoResponse struct {
+	libraryFile
+	Source string `json:"source" doc:"images or isos"`
+}
+
+// handleImageInfo says what an image is before anyone spends a disc on it:
+// whether it is really an ISO, what disc it needs, and - the question
+// nobody can answer by looking at the file - whether the result will boot,
+// on what firmware, and for which processor.
+func (s *server) handleImageInfo(w http.ResponseWriter, r *http.Request) {
+	source := r.URL.Query().Get("source")
+	src, err := s.sourceStore(source)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+	name := r.URL.Query().Get("name")
+	if !validName(name) {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: errBadName.Error()})
+		return
+	}
+	f, info, err := src.Open(name)
+	if err != nil {
+		code := http.StatusInternalServerError
+		if errors.Is(err, errNoSuchImage) {
+			code = http.StatusNotFound
+		}
+		writeJSON(w, code, errorResponse{Error: err.Error()})
+		return
+	}
+	defer f.Close()
+	writeJSON(w, http.StatusOK, imageInfoResponse{
+		libraryFile: inspectImage(f, info),
+		Source:      cmp(source, sourceImages),
+	})
+}
+
+// inspectImage reads the few hundred bytes that say what an image is.
+func inspectImage(f io.ReadSeeker, info storedFile) libraryFile {
+	out := describeSize(info)
+	at := seekReaderAt{f}
+	if fsys, err := iso9660.Open(at); err == nil {
+		out.Volume = fsys.Volume().VolumeID
+	}
+	boot, err := iso9660.ReadBootInfo(at)
+	switch {
+	case errors.Is(err, iso9660.ErrNotISO9660):
+		out.Error = "this file is not an ISO 9660 image. It may still be a disc image of some " +
+			"other kind, but ripperX cannot tell, and a disk image meant for a USB stick " +
+			"written to a disc will not boot."
+	case err != nil:
+		out.Error = err.Error()
+	default:
+		out.Boot = boot
+	}
+	out.Summary = describeImage(out)
+	return out
+}
+
+func cmp(v, fallback string) string {
+	if v == "" {
+		return fallback
+	}
+	return v
+}
+
+func describeImage(r libraryFile) string {
+	if r.Error != "" {
+		return r.Error
+	}
+	line := fmt.Sprintf("%s, needs a %s", humanBytes(r.Size), r.Needs)
+	if !r.Aligned {
+		return line + ". It is not a whole number of 2048-byte sectors, so it is not a disc image and cannot be burned."
+	}
+	if r.Volume != "" {
+		line += fmt.Sprintf(", volume %q", r.Volume)
+	}
+	if r.Boot != nil {
+		line += ". " + upperFirst(r.Boot.Summary())
+	}
+	return line + "."
+}
+
+func upperFirst(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
+}
+
+// factCache remembers what was found inside each image, so that listing a
+// library of sixty installer images does not read sixty images every time
+// the page loads. A file is identified by its name, size and modification
+// time, so a file that changes is looked at again and a file that is gone
+// stops being remembered.
+type factCache struct {
+	mu sync.Mutex
+	m  map[string]libraryFile
+}
+
+func newFactCache() *factCache { return &factCache{m: map[string]libraryFile{}} }
+
+func factKey(f storedFile) string {
+	return fmt.Sprintf("%s|%d|%d", f.Name, f.Size, f.ModTime.UnixNano())
+}
+
+// factWorkers is how many images are looked at concurrently. The reads are
+// small but there are two or three round trips in each, and over a share
+// that is latency rather than work - so several at once, and not so many
+// that a listing becomes a burst of connections to somebody's NAS.
+const factWorkers = 6
+
+// fill looks inside every file it has not already looked inside.
+//
+// It stops when the request does: an image that could not be read in time
+// is listed without its facts and looked at on the next pass. A slower
+// answer is better than no listing, and much better than a page that hangs
+// because a share went away.
+func (c *factCache) fill(ctx context.Context, src store, files []storedFile) []libraryFile {
+	out := make([]libraryFile, len(files))
+	var todo []int
+	c.mu.Lock()
+	for i, f := range files {
+		if known, ok := c.m[factKey(f)]; ok {
+			out[i] = known
+			continue
+		}
+		out[i] = describeSize(f)
+		todo = append(todo, i)
+	}
+	c.mu.Unlock()
+
+	work := make(chan int)
+	var wg sync.WaitGroup
+	for range min(factWorkers, len(todo)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range work {
+				f, info, err := src.Open(files[i].Name)
+				if err != nil {
+					continue
+				}
+				found := inspectImage(f, info)
+				f.Close()
+				c.mu.Lock()
+				c.m[factKey(files[i])] = found
+				out[i] = found
+				c.mu.Unlock()
+			}
+		}()
+	}
+	for _, i := range todo {
+		select {
+		case work <- i:
+		case <-ctx.Done():
+		}
+	}
+	close(work)
+	wg.Wait()
+
+	c.forget(files)
+	return out
+}
+
+// forget drops what was remembered about files that are no longer there, so
+// the cache cannot grow without bound on a library that is being replaced a
+// file at a time.
+func (c *factCache) forget(files []storedFile) {
+	keep := make(map[string]bool, len(files))
+	for _, f := range files {
+		keep[factKey(f)] = true
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for k := range c.m {
+		if !keep[k] {
+			delete(c.m, k)
+		}
+	}
 }
