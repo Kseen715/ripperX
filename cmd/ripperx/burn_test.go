@@ -296,7 +296,7 @@ func TestReadOnlyStoreRefusesWrites(t *testing.T) {
 	if err := ro.Remove("x.iso"); !errors.Is(err, errReadOnlyStore) {
 		t.Errorf("Remove gave %v, want a refusal", err)
 	}
-	if _, ok := ro.FreeBytes(); ok {
+	if _, _, ok := ro.Space(); ok {
 		t.Error("free space is meaningless for a library nothing is written to")
 	}
 	// Reading still works, which is the whole point of having it.

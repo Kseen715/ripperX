@@ -1721,7 +1721,8 @@ async function loadImages() {
   try {
     const r = await api('/api/images');
     state.images = r.files || [];
-    el('storeLine').textContent = `${r.store}${r.free ? ` · ${bytes(r.free)} free` : ''}`;
+    setText(el('storeLine'), r.store);
+    renderSpace(r);
     el('storeFoot').textContent = r.store;
     renderImages();
     if (state.detail) renderBurnBox(state.detail);
@@ -1733,7 +1734,11 @@ async function loadImages() {
 // A store can hold hundreds of images. Two things follow: nothing is found
 // by scrolling, so there is a filter; and a browser asked to lay out a
 // thousand rows at once stops responding while it does, so only the first
-// hundred are drawn until the rest are asked for.
+// page is drawn until the rest are asked for.
+//
+// One screenful, deliberately. The panel scrolls, and a page that is longer
+// than the box it sits in means scrolling to find out there is more below -
+// which is the thing the filter and the count exist to avoid.
 const imagePage = 10;
 
 function matching(files, query) {
@@ -1756,6 +1761,26 @@ function countLine(shown, matched, total, what) {
       : `${matched} of ${total} ${what}`;
   }
   return shown < total ? `${shown} of ${total} ${what}` : `${total} ${what}`;
+}
+
+// A dual-layer rip is 8 GB and a share fills as quietly as a disk does. The
+// bar turns when there is less than one disc's worth left, because that is
+// the point at which the next rip is the one that fails.
+const lowSpace = 9 << 30;
+
+function renderSpace(r) {
+  const box = el('storeSpace');
+  setHidden(box, !r.total);
+  if (!r.total) return;
+  const used = r.total - (r.free || 0);
+  const share = Math.max(0, Math.min(100, (used / r.total) * 100));
+  const low = (r.free || 0) < lowSpace;
+  const meter = box.querySelector('.meter');
+  setWidth(meter.firstChild, `${share.toFixed(1)}%`);
+  setClass(meter, 'low', low);
+  setClass(el('storeFree'), 'low', low);
+  setText(el('storeFree'), `${bytes(r.free)} free of ${bytes(r.total)}` +
+    (low ? ' \u2014 not enough for a full disc' : ''));
 }
 
 function renderImages() {

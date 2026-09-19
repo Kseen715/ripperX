@@ -30,6 +30,7 @@ type libraryResponse struct {
 	Store string        `json:"store" doc:"where they are, with no password in it"`
 	Kind  string        `json:"kind" doc:"local or smb"`
 	Free  int64         `json:"free,omitempty" doc:"bytes free where images are written, when that can be established"`
+	Total int64         `json:"total,omitempty" doc:"how big that is in all, so the free figure has something to be a share of"`
 	// ReadOnly marks the library nothing can be written to, so a page does
 	// not offer a delete button it would only be refused for.
 	ReadOnly bool `json:"readOnly,omitempty" doc:"true for the read-only image library"`
@@ -42,8 +43,8 @@ func (s *server) handleLibrary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := libraryResponse{Files: plainFiles(files), Store: s.store.Describe(), Kind: s.store.Kind()}
-	if free, ok := s.store.FreeBytes(); ok {
-		resp.Free = free
+	if free, total, ok := s.store.Space(); ok {
+		resp.Free, resp.Total = free, total
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

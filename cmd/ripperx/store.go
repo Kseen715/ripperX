@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -131,10 +132,10 @@ type store interface {
 	// password.
 	Describe() string
 	Kind() string
-	// FreeBytes reports the space left where images are written. The second
-	// result is false when that cannot be established, which is the normal
-	// case for a share.
-	FreeBytes() (int64, bool)
+	// Space reports what is left where images are written and how much
+	// there is in all. ok is false where that cannot be established, which
+	// is a read-only library and a share whose server will not say.
+	Space() (free, total int64, ok bool)
 }
 
 // openStore picks where images live: an SMB share when one is configured,
@@ -237,12 +238,15 @@ func (l *localStore) Kind() string     { return "local" }
 // FreeBytes is what stops a rip from filling a root filesystem. The figure
 // is the space available to this user, not the total free space, which is
 // what actually matters on a filesystem with reserved blocks.
-func (l *localStore) FreeBytes() (int64, bool) {
+func (l *localStore) Space() (int64, int64, bool) {
 	var st unix.Statfs_t
 	if err := unix.Statfs(l.dir, &st); err != nil {
-		return 0, false
+		return 0, 0, false
 	}
-	return int64(st.Bavail) * int64(st.Bsize), true
+	// Bavail rather than Bfree: the blocks reserved for root are not space
+	// a rip can use, and counting them means promising room that is not
+	// there.
+	return int64(st.Bavail) * int64(st.Bsize), int64(st.Blocks) * int64(st.Bsize), true
 }
 
 // localPath is the real path of a stored file, which the burner program
@@ -280,7 +284,19 @@ type smbStore struct {
 	user   string
 	pass   string
 	domain string
+
+	// What the server last said about the room left on the share, and when.
+	spaceMu    sync.Mutex
+	spaceAt    time.Time
+	spaceFree  int64
+	spaceTotal int64
+	spaceOK    bool
 }
+
+// spaceCacheFor is how long the share's free space is believed. Long enough
+// that listing the images and starting a rip do not ask twice; short enough
+// that the figure on the page is the figure now.
+const spaceCacheFor = 10 * time.Second
 
 // newSMBStore parses //host[:port]/share[/subdir]. Backslashes and an smb://
 // prefix are accepted too, since that is how the same address gets written
@@ -489,10 +505,70 @@ func (s *smbStore) Describe() string {
 
 func (s *smbStore) Kind() string { return "smb" }
 
-// FreeBytes is not asked of a share: the protocol can answer it, but a
-// share's quota and its underlying filesystem often disagree, and a wrong
-// "no room" refusing a rip is worse than no figure at all.
-func (s *smbStore) FreeBytes() (int64, bool) { return 0, false }
+// Space asks the server how much room is left on the share.
+//
+// It is worth the round trip twice over. Filling a NAS is as easy as filling
+// a disk, and a rip that runs out of room does so twenty minutes in, on a
+// disc that then has to be read again. The figure is cached for a few
+// seconds because two things ask for it at once - the page listing the
+// images, and the check in front of every rip.
+func (s *smbStore) Space() (int64, int64, bool) {
+	s.spaceMu.Lock()
+	defer s.spaceMu.Unlock()
+	if time.Since(s.spaceAt) < spaceCacheFor {
+		return s.spaceFree, s.spaceTotal, s.spaceOK
+	}
+	s.spaceAt = time.Now()
+	s.spaceFree, s.spaceTotal, s.spaceOK = 0, 0, false
+
+	c, err := s.connect()
+	if err != nil {
+		return 0, 0, false
+	}
+	defer c.Close()
+	dir := strings.ReplaceAll(s.dir, `\`, "/")
+	if dir == "" {
+		dir = "."
+	}
+	st, err := c.share.Statfs(dir)
+	if err != nil {
+		// A share whose folder does not exist yet, or a server that will
+		// not answer: not knowing is a normal answer, not a failure.
+		return 0, 0, false
+	}
+	unit := allocationUnit(st.BlockSize(), st.FragmentSize())
+	if unit <= 0 {
+		return 0, 0, false
+	}
+	// AvailableBlockCount rather than FreeBlockCount: on a share with a
+	// quota those differ, and the quota is what applies here.
+	s.spaceFree = int64(st.AvailableBlockCount()) * unit
+	s.spaceTotal = int64(st.TotalBlockCount()) * unit
+	s.spaceOK = s.spaceTotal > 0
+	return s.spaceFree, s.spaceTotal, s.spaceOK
+}
+
+// allocationUnit is how many bytes one of the counts SMB returns stands
+// for.
+//
+// The counts are in allocation units, and an allocation unit is
+// SectorsPerAllocationUnit * BytesPerSector. The library's names for those
+// two are worth reading twice: BlockSize is the bytes in a sector, and
+// FragmentSize is the number of sectors in an allocation unit - a count,
+// not a size. Multiplying by BlockSize alone reports a share as exactly
+// SectorsPerAllocationUnit times smaller than it is, which on a 7.5 TB
+// share with two sectors to the unit is a confident, wrong 3.8 TB.
+func allocationUnit(bytesPerSector, sectorsPerUnit uint64) int64 {
+	if bytesPerSector == 0 {
+		return 0
+	}
+	if sectorsPerUnit == 0 {
+		// A server that does not say is taken at one sector to the unit
+		// rather than not answered at all.
+		sectorsPerUnit = 1
+	}
+	return int64(bytesPerSector) * int64(sectorsPerUnit)
+}
 
 // readOnlyStore is a store that refuses to be written to. It wraps the ISO
 // library: a directory of installer images that ripperX burns from and must
@@ -507,8 +583,8 @@ var errReadOnlyStore = errors.New("this is a read-only library; nothing can be w
 func (readOnlyStore) Create(string) (io.WriteCloser, error) { return nil, errReadOnlyStore }
 func (readOnlyStore) Remove(string) error                   { return errReadOnlyStore }
 
-// FreeBytes is meaningless for a library nothing is written to.
-func (readOnlyStore) FreeBytes() (int64, bool) { return 0, false }
+// Space is meaningless for a library nothing is written to.
+func (readOnlyStore) Space() (int64, int64, bool) { return 0, 0, false }
 
 // localPath is deliberately not forwarded: the burner is handed a path only
 // through stageImage, which asks the writable store. Forwarding it would

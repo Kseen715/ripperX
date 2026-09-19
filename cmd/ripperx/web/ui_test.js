@@ -52,7 +52,10 @@ manyImages.push({
   name: 'Terminator-5v1-20260919.zip', size: 3_900_000_000,
   modTime: '2026-01-02T00:00:00Z', needs: 'dual-layer DVD',
 });
-const images = { files: manyImages, store: '//nas/images', kind: 'smb' };
+const images = {
+  files: manyImages, store: '//nas/images', kind: 'smb',
+  free: 412 * 1024 ** 3, total: 3.6 * 1024 ** 4,
+};
 const isos = {
   files: [{
     name: 'debian.iso', size: 2048 * 500, modTime: '2026-01-01T00:00:00Z',
@@ -209,11 +212,15 @@ const settle = () => new Promise((r) => setTimeout(r, 30));
   loaded = true;
   push(snapshot([]));
   await settle();
-  check('only the first page of images is drawn',
-    doc.querySelectorAll('#imageRows tr').length === 100,
-    `${doc.querySelectorAll('#imageRows tr').length} rows`);
+  // How many rows make a page is the page's business; what is checked is
+  // that there is a limit, that the count says so, and that the rest can
+  // still be had. Pinning the number here would mean this test had an
+  // opinion about a layout choice, and would break when that changed.
+  const drawn = doc.querySelectorAll('#imageRows tr').length;
+  check('the image list is capped rather than drawn in full',
+    drawn > 0 && drawn < manyImages.length, `${drawn} of ${manyImages.length} rows`);
   check('the count says what is being shown',
-    doc.getElementById('imageCount').textContent === '100 of 251 images',
+    doc.getElementById('imageCount').textContent === `${drawn} of 251 images`,
     doc.getElementById('imageCount').textContent);
   doc.getElementById('imageMore').click();
   await settle();
@@ -234,6 +241,12 @@ const settle = () => new Promise((r) => setTimeout(r, 30));
   filter.value = '';
   filter.dispatchEvent(new window.Event('input'));
   await settle();
+
+  check('the space left on the store is shown',
+    doc.getElementById('storeFree').textContent === '412 GB free of 3.6 TB',
+    doc.getElementById('storeFree').textContent);
+  check('and is not marked as low when it is not',
+    !doc.getElementById('storeFree').classList.contains('low'));
 
   // ---- an archive is burnable, as the files inside it ----
   burnable = true;

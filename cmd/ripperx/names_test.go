@@ -187,7 +187,7 @@ func (emptyStore) List() ([]storedFile, error) { return nil, nil }
 func (emptyStore) Remove(string) error         { return errNoSuchImage }
 func (emptyStore) Describe() string            { return "//nowhere/share" }
 func (emptyStore) Kind() string                { return "smb" }
-func (emptyStore) FreeBytes() (int64, bool)    { return 0, false }
+func (emptyStore) Space() (int64, int64, bool) { return 0, 0, false }
 
 // A drive that is busy is 409, never 400. A client told its request was
 // malformed will change the request, which is precisely the wrong thing to
@@ -271,5 +271,35 @@ func TestContentDispositionCarriesNonLatinNames(t *testing.T) {
 	inline := httptest.NewRequest(http.MethodGet, "/api/drives/sr0/file?path=/x&inline=1", nil)
 	if got := contentDisposition(inline, "clip.mp4"); !strings.HasPrefix(got, "inline;") {
 		t.Errorf("an inline request = %q, want it played rather than downloaded", got)
+	}
+}
+
+// SMB reports the room on a share in allocation units, and an allocation
+// unit is two numbers multiplied together. Using one of them reports a
+// share as a whole multiple smaller than it is - which is not an error
+// anything catches, because the answer looks perfectly reasonable.
+func TestAllocationUnitIsBothNumbers(t *testing.T) {
+	cases := []struct {
+		bytesPerSector, sectorsPerUnit uint64
+		want                           int64
+	}{
+		{512, 8, 4096},  // the ordinary NTFS cluster
+		{2048, 2, 4096}, // what the share in front of me reports
+		{4096, 1, 4096}, // sectors the size of the unit
+		{512, 0, 512},   // a server that will not say
+		{0, 8, 0},       // and one that says nothing usable
+	}
+	for _, c := range cases {
+		if got := allocationUnit(c.bytesPerSector, c.sectorsPerUnit); got != c.want {
+			t.Errorf("allocationUnit(%d, %d) = %d, want %d",
+				c.bytesPerSector, c.sectorsPerUnit, got, c.want)
+		}
+	}
+
+	// The figure that started this: 7.56 TB of share reported as 3.8 TB.
+	const units = 1_977_614_336 // allocation units on //TOWER/tower-vault
+	total := int64(units) * allocationUnit(2048, 2)
+	if tb := float64(total) / (1 << 40); tb < 7.3 || tb > 7.7 {
+		t.Errorf("a 7.56 TB share came out as %.2f TB", tb)
 	}
 }

@@ -665,7 +665,7 @@ func copyCtx(ctx context.Context, dst io.Writer, src io.Reader, want int64) (int
 // a gigabyte of headroom, because filling a root filesystem completely
 // costs far more than a refused rip.
 func (s *server) checkRoom(need int64) error {
-	free, ok := s.store.FreeBytes()
+	free, _, ok := s.store.Space()
 	if !ok || need <= 0 {
 		return nil
 	}

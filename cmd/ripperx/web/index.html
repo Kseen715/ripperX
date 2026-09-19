@@ -300,6 +300,16 @@
 
   .label-as { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .1em; }
 
+  /* How full the store is. The bar is the same grammar as a job's, without
+     the hatching: this one is a level, not something in progress. */
+  .meter { height: 6px; background: var(--sunken); border: 1px solid var(--line); }
+  .meter > i { display: block; height: 100%; width: 0; background: var(--ink-2); transition: width .3s; }
+  /* Under a disc's worth left, which is the point at which the next rip is
+     the one that fails. */
+  .meter.low > i { background: var(--accent); }
+  .spaceline { font-size: 11px; color: var(--muted); margin: 5px 0 0; font-variant-numeric: tabular-nums; }
+  .spaceline.low { color: var(--accent); }
+
   /* A store with hundreds of images in it is a store nobody scrolls. */
   .findbox {
     font: inherit; font-size: 13px; padding: 6px 9px; flex: 1 1 160px; min-width: 0;
@@ -612,7 +622,13 @@
 
     <div class="panel cut" style="margin:0">
       <p class="label">Images</p>
-      <p class="muted" id="storeLine" style="font-size:11px;margin:0 0 10px;word-break:break-all"></p>
+      <p class="muted" id="storeLine" style="font-size:11px;margin:0 0 8px;word-break:break-all"></p>
+      <!-- How full the share is. A disc image is four gigabytes at a time,
+           and a share fills as quietly as a disk does. -->
+      <div id="storeSpace" hidden style="margin:0 0 12px">
+        <div class="meter"><i></i></div>
+        <p class="spaceline" id="storeFree"></p>
+      </div>
       <!-- No form element: the upload goes through XMLHttpRequest so that it
            can report how far it has got, and a form here would only add a
            way to submit it without that. -->
