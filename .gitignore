@@ -4,6 +4,10 @@
 /.gocache/
 *.run
 
+# The page's test needs jsdom; nothing that ships does.
+/node_modules/
+/package-lock.json
+
 # Images and rips, in case anyone points -out at the working directory.
 *.iso
 *.img

@@ -36,6 +36,10 @@
   }
 }
 * { box-sizing: border-box; border-radius: 0 !important; }
+/* A long file name inside a flex or grid child stretches its track rather
+   than wrapping, and the whole page grows a horizontal scrollbar. This is
+   the one rule that stops that happening everywhere at once. */
+.wrap, .panel, .two > *, .cols > * { min-width: 0; }
 /* Keep the scrollbar's width reserved whether or not there is a scrollbar.
    Without this, a page that grows past the viewport - a job list, a disc
    with a lot of files - shifts everything sideways as it appears. */
@@ -44,7 +48,7 @@ html { scrollbar-gutter: stable; }
    shows the browser's broken-image glyph. */
 [hidden] { display: none !important; }
 body {
-  margin: 0; padding: 28px 16px; background: var(--bg); color: var(--ink);
+  margin: 0; padding: 24px 16px; background: var(--bg); color: var(--ink);
   font: 14px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   /* Faint vector grid: grayscale, purely structural. */
   background-image:
@@ -63,6 +67,22 @@ header {
   border: 1px solid var(--line); background: var(--panel);
   padding: 14px 16px; margin-bottom: 16px; position: relative;
 }
+.masthead { display: flex; gap: 12px 16px; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; }
+.masthead .sub { font-size: 12px; color: var(--ink-2); margin: 0; word-break: break-word; }
+.headright { display: flex; gap: 10px; align-items: center; flex: none; }
+/* Whether this page is receiving the shared state. It is one word and a
+   mark, not a sentence: it is only interesting when it is wrong. */
+.conn {
+  font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 6px;
+  white-space: nowrap;
+}
+.conn::before {
+  content: ""; width: 7px; height: 7px; flex: none;
+  background: var(--muted); border: 1px solid var(--muted);
+}
+.conn.live::before { background: var(--ink); border-color: var(--ink); }
+.conn.off::before { background: transparent; border-color: var(--accent); }
+.conn.off { color: var(--accent); }
 /* Registration mark, kept off the chamfered corners. */
 .regmark {
   position: absolute; top: 10px; right: 12px; width: 11px; height: 11px;
@@ -77,7 +97,7 @@ h1 {
 
 .panel {
   background: var(--panel); border: 1px solid var(--line);
-  padding: 14px; margin-bottom: 16px;
+  padding: 16px; margin-bottom: 16px;
 }
 /* 45-degree chamfer on two opposing corners, with the border continuing
    around the diagonal. The pseudo-element sits over the square corner,
@@ -162,3 +182,18 @@ hr { border: 0; border-top: 1px solid var(--hair); margin: 14px 0; }
 code { font-size: 11px; color: var(--ink-2); word-break: break-all; }
 a { color: var(--ink); }
 .foot { font-size: 11px; color: var(--muted); margin-top: 18px; line-height: 1.7; }
+
+/* Narrow screens. The page is one column throughout; what changes here is
+   the furniture, which is worth less than the content when there are 360
+   pixels of it. */
+@media (max-width: 640px) {
+  body { padding: 12px 10px; }
+  header { padding: 12px; margin-bottom: 12px; }
+  .panel { padding: 12px; margin-bottom: 12px; }
+  .headright { width: 100%; justify-content: space-between; }
+  /* The chamfer is a 10-pixel detail that costs a pseudo-element on every
+     panel; at this width it reads as a rendering fault rather than a cut. */
+  .cut::before, .cut::after { display: none; }
+  h1 { font-size: 12px; }
+  .foot { font-size: 11px; margin-top: 14px; }
+}

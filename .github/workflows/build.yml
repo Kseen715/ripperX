@@ -53,8 +53,20 @@ jobs:
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "next release: ${tag}" >> "$GITHUB_STEP_SUMMARY"
 
+  # The page's own test: it drives index.html and app.js in a DOM and checks
+  # that a snapshot from the server does not rebuild what is on screen.
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --no-audit --no-fund
+      - run: npm test
+
   build:
-    needs: [test, version]
+    needs: [test, ui, version]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

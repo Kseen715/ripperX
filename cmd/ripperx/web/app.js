@@ -15,7 +15,7 @@ const state = {
   drives: [],        // from the snapshot
   jobs: [],
   selected: null,    // drive id
-  tab: 'disc',
+  tab: 'rip',
   detail: null,      // /api/drives/<id>, which includes the volume and capabilities
   discKey: '',       // identifies the disc; a change means reload everything below
   path: '/',
@@ -89,6 +89,94 @@ function text(tag, s, cls) {
   return n;
 }
 
+/* ---------- keeping the page still ---------- */
+
+// The server pushes a whole snapshot of itself twice a second, and this page
+// used to rebuild its DOM from each one. That is what made it flicker: the
+// row under the cursor was destroyed and built again between the press of a
+// mouse button and its release, a menu could not be held open, and every
+// list jumped as it was replaced. None of it was a paint problem - it was
+// the page throwing away the thing you were pointing at.
+//
+// So nothing below rebuilds. sync() keeps a list of rows in step with a list
+// of items by key, creating only what is new and leaving everything else
+// exactly where it is; memo() skips work whose inputs have not changed; and
+// the setters below write to the DOM only when the value is different,
+// because assigning the same string still costs a style recalculation and,
+// on a text node inside a selection, the selection.
+
+function sync(container, items, keyOf, create, update) {
+  const have = new Map();
+  for (const node of Array.from(container.children)) {
+    const k = node.dataset.key;
+    if (k === undefined) { node.remove(); continue; }
+    have.set(k, node);
+  }
+  let prev = null;
+  for (const item of items) {
+    const k = String(keyOf(item));
+    let node = have.get(k);
+    if (node) {
+      have.delete(k);
+    } else {
+      node = create(item);
+      node.dataset.key = k;
+    }
+    update(node, item);
+    // Move it only if it is not already in the right place: moving a node
+    // that holds the focus takes the focus with it.
+    const want = prev ? prev.nextSibling : container.firstChild;
+    if (node !== want) container.insertBefore(node, want);
+    prev = node;
+  }
+  for (const node of have.values()) node.remove();
+}
+
+const memos = new Map();
+
+// memo runs fn only when its inputs have actually changed. Most of what
+// arrives in a snapshot is identical to the last one - a disc does not
+// change twice a second - so this is what turns a redraw of everything into
+// a redraw of the one figure that moved.
+function memo(name, inputs, fn) {
+  const key = JSON.stringify(inputs);
+  if (memos.get(name) === key) return false;
+  memos.set(name, key);
+  fn();
+  return true;
+}
+
+// forget makes the next render of name unconditional. Used where something
+// outside the snapshot changed, such as a disc being swapped.
+function forget(name) {
+  for (const k of Array.from(memos.keys())) {
+    if (k === name || k.startsWith(name + ':')) memos.delete(k);
+  }
+}
+
+function setText(node, s) {
+  const v = s === null || s === undefined ? '' : String(s);
+  if (node.textContent !== v) node.textContent = v;
+}
+
+function setHidden(node, hidden) {
+  if (node.hidden !== !!hidden) node.hidden = !!hidden;
+}
+
+function setDisabled(node, off) {
+  if (node.disabled !== !!off) node.disabled = !!off;
+}
+
+function setClass(node, cls, on) {
+  if (node.classList.contains(cls) !== !!on) node.classList.toggle(cls, !!on);
+}
+
+function setWidth(node, w) {
+  if (node.style.width !== w) node.style.width = w;
+}
+
+/* ---------- errors ---------- */
+
 function fail(msg) {
   el('error').textContent = msg;
   el('error').hidden = !msg;
@@ -119,6 +207,14 @@ const post = (path, body) => api(path, {
 
 function driveByID(id) { return state.drives.find((d) => d.id === id) || null; }
 
+// forgetDisc drops what was memoised about whatever was in the drive, so a
+// swapped disc is drawn again rather than compared against the last one.
+function forgetDisc() {
+  for (const name of ['dischead', 'rip', 'scan', 'burn', 'append', 'files', 'audio', 'drive']) {
+    forget(name);
+  }
+}
+
 // discKey changes exactly when the disc does. It is what decides whether the
 // file listing and the volume details still describe what is in the drive.
 function discKey(d) {
@@ -127,57 +223,62 @@ function discKey(d) {
 }
 
 function renderDrives() {
-  const box = el('drives');
-  box.textContent = '';
-  el('noDrives').hidden = state.drives.length > 0;
-
-  for (const d of state.drives) {
-    const card = document.createElement('div');
-    card.className = 'card' + (d.id === state.selected ? ' on' : '');
-
-    // Choosing a drive and opening its tray are different things, so they
-    // are different controls: the heading selects, the buttons act.
-    const pick = document.createElement('button');
-    pick.type = 'button';
-    pick.className = 'pick';
-    pick.setAttribute('aria-pressed', d.id === state.selected ? 'true' : 'false');
-    pick.addEventListener('click', () => select(d.id));
-
-    const name = document.createElement('div');
-    name.appendChild(text('h2', d.name || d.id));
-    name.appendChild(text('div', d.path, 'dev'));
-    pick.appendChild(name);
-
-    if (d.busy) pick.appendChild(text('span', 'working', 'chip busy'));
-    else if (!d.disc || !d.disc.present) pick.appendChild(text('span', 'empty', 'chip none'));
-    else pick.appendChild(text('span', d.disc.profileName, 'chip'));
-    card.appendChild(pick);
-
-    card.appendChild(text('div', describeDisc(d), 'muted'));
-
-    if (state.status && state.status.allowEject) {
-      const tray = document.createElement('div');
-      tray.className = 'tray';
-      tray.appendChild(trayButton(d, 'eject', 'Open'));
-      tray.appendChild(trayButton(d, 'load', 'Close'));
-      const refresh = text('button', 'Re-read');
-      refresh.type = 'button';
-      refresh.title = 'Forget what is known about the disc and ask the drive again';
-      refresh.disabled = !!d.busy;
-      refresh.addEventListener('click', async () => {
-        refresh.disabled = true;
-        try { await post(`/api/drives/${encodeURIComponent(d.id)}/refresh`); fail(''); }
-        catch (e) { fail(String(e.message || e)); }
-        if (d.id === state.selected) loadDetail();
-      });
-      tray.appendChild(refresh);
-      card.appendChild(tray);
-    }
-    box.appendChild(card);
-  }
-
+  setHidden(el('noDrives'), state.drives.length > 0);
+  sync(el('drives'), state.drives, (d) => d.id, createDriveRow, updateDriveRow);
   if (!state.selected && state.drives.length === 1) select(state.drives[0].id);
   if (state.selected && !driveByID(state.selected)) select(null);
+}
+
+// A drive is a row built once. Everything that changes about it - what is
+// in it, whether a job has it - is written into the same nodes afterwards.
+function createDriveRow(d) {
+  const row = document.createElement('div');
+  row.className = 'drive';
+
+  const pick = document.createElement('button');
+  pick.type = 'button';
+  pick.className = 'pick';
+  pick.appendChild(text('div', '', 'dname'));
+  pick.appendChild(text('div', '', 'dwhat'));
+  pick.addEventListener('click', () => select(d.id));
+  row.appendChild(pick);
+
+  row.appendChild(text('span', '', 'chip'));
+
+  if (state.status && state.status.allowEject) {
+    const tray = document.createElement('div');
+    tray.className = 'tray';
+    tray.appendChild(trayButton(d, 'eject', 'Open'));
+    tray.appendChild(trayButton(d, 'load', 'Close'));
+
+    const refresh = text('button', 'Re-read');
+    refresh.type = 'button';
+    refresh.dataset.act = 'refresh';
+    refresh.title = 'Forget what is known about the disc and ask the drive again';
+    refresh.addEventListener('click', async () => {
+      refresh.disabled = true;
+      try { await post(`/api/drives/${encodeURIComponent(d.id)}/refresh`); fail(''); }
+      catch (e) { fail(String(e.message || e)); }
+      if (d.id === state.selected) loadDetail();
+    });
+    tray.appendChild(refresh);
+    row.appendChild(tray);
+  }
+  return row;
+}
+
+function updateDriveRow(row, d) {
+  setClass(row, 'on', d.id === state.selected);
+  row.querySelector('.pick').setAttribute('aria-pressed', d.id === state.selected ? 'true' : 'false');
+  setText(row.querySelector('.dname'), d.name || d.id);
+  setText(row.querySelector('.dwhat'), `${d.path} \u00b7 ${describeDisc(d)}`);
+
+  const chip = row.querySelector('.chip');
+  if (d.busy) { setText(chip, 'working'); chip.className = 'chip busy'; }
+  else if (!d.disc || !d.disc.present) { setText(chip, 'empty'); chip.className = 'chip none'; }
+  else { setText(chip, d.disc.profileName); chip.className = 'chip'; }
+
+  for (const b of row.querySelectorAll('.tray button')) setDisabled(b, !!d.busy);
 }
 
 // trayButton opens or closes one drive. It is disabled while a job has the
@@ -185,7 +286,7 @@ function renderDrives() {
 function trayButton(d, action, label) {
   const b = text('button', label);
   b.type = 'button';
-  b.disabled = !!d.busy;
+  b.dataset.act = action;
   b.title = action === 'eject'
     ? 'Open this drive\u2019s tray'
     : 'Close this drive\u2019s tray and read what is in it';
@@ -219,6 +320,8 @@ async function select(id) {
   state.discKey = '';
   state.path = '/';
   state.picked.clear();
+  // Everything remembered below was remembered about another drive.
+  forgetDisc();
   renderDrives();
   el('work').hidden = !id;
   if (!id) return;
@@ -245,28 +348,104 @@ async function loadDetail() {
 
 /* ---------- the workspace ---------- */
 
-function setTab(tab) {
+// The panes, in the order they appear. Which of them are offered depends on
+// what is in the drive: a disc with no filesystem has nothing to browse, and
+// a machine that cannot burn is not asked about burning. Hiding what cannot
+// be done is most of what makes this page quiet.
+const panes = {
+  rip:   { id: 'paneRip',   label: 'Rip' },
+  files: { id: 'paneFiles', label: 'Files' },
+  audio: { id: 'paneAudio', label: 'Audio' },
+  check: { id: 'paneCheck', label: 'Check' },
+  burn:  { id: 'paneBurn',  label: 'Burn' },
+  add:   { id: 'paneAdd',   label: 'Add files' },
+  drive: { id: 'paneDrive', label: 'Drive' },
+};
+
+function segItems(d) {
+  const present = !!(d.disc && d.disc.present);
+  const burning = !!(state.status && state.status.allowBurn);
+  const out = [];
+  // An empty drive can be asked about itself, and - if it could take a
+  // blank - about burning. Nothing else applies.
+  if (present) {
+    if (d.canRipIso || d.canRipImg || d.canRipAudio) out.push('rip');
+    if (d.canBrowse) out.push('files');
+    if (d.disc.audioTracks > 0) out.push('audio');
+    out.push('check');
+  }
+  // Burning is offered whenever this server can burn: the pane says why a
+  // particular disc cannot be, which is what somebody holding a blank needs
+  // to read. Adding to a disc is offered only when this disc actually takes
+  // it, because there is nothing to do about a disc that does not.
+  if (burning) out.push('burn');
+  if (burning && present && d.canAppend) out.push('add');
+  out.push('drive');
+  return out;
+}
+
+// showPane is the cheap half: which pane is visible and which button looks
+// pressed. It runs on every snapshot, so it must not start anything.
+function showPane(tab) {
   state.tab = tab;
-  for (const b of document.querySelectorAll('.tabs button')) {
-    const on = b.dataset.tab === tab;
-    b.classList.toggle('active', on);
+  for (const [name, pane] of Object.entries(panes)) {
+    setHidden(el(pane.id), name !== tab);
+  }
+  for (const b of el('seg').children) {
+    const on = b.dataset.key === tab;
+    setClass(b, 'active', on);
     b.setAttribute('aria-pressed', on ? 'true' : 'false');
   }
-  el('tabDisc').hidden = tab !== 'disc';
-  el('tabFiles').hidden = tab !== 'files';
-  el('tabAudio').hidden = tab !== 'audio';
-  el('tabDrive').hidden = tab !== 'drive';
+}
+
+// setTab is what a press does, and the only thing that may fetch. Reading a
+// directory from here rather than from showPane matters: showPane runs twice
+// a second, and a disc whose root is genuinely empty would have had its
+// listing requested twice a second for as long as the tab was open.
+function setTab(tab) {
+  showPane(tab);
+  if (state.detail) renderPane(state.detail);
   if (tab === 'files' && state.entries.length === 0) loadDir(state.path);
+}
+
+function renderSeg(d) {
+  const items = segItems(d);
+  sync(el('seg'), items, (k) => k, (k) => {
+    const b = text('button', panes[k].label);
+    b.type = 'button';
+    b.addEventListener('click', () => setTab(k));
+    return b;
+  }, () => {});
+  // The pane that was open may no longer be on offer - a disc came out, or
+  // one with no filesystem went in. Falling back to the first thing that is
+  // counts as a press, because it is a pane nobody has opened yet.
+  if (!items.includes(state.tab)) setTab(items[0]);
+  else showPane(state.tab);
+  setHidden(el('seg'), items.length === 0);
 }
 
 function renderWork() {
   const d = state.detail;
   if (!d) return;
-  el('workTitle').textContent = `${d.name || d.id} — ${d.path}`;
-  renderDiscTab(d);
-  renderFilesTab(d);
-  renderAudioTab(d);
-  renderDriveTab(d);
+  setText(el('workTitle'), `${d.name || d.id} — ${d.path}`);
+  renderDiscHead(d);
+  renderSeg(d);
+  renderPane(d);
+}
+
+// Only the pane that is on screen is drawn. A pane that is hidden is drawn
+// when it is opened, and the memo below it keeps that from costing anything
+// when nothing has changed since.
+function renderPane(d) {
+  switch (state.tab) {
+    case 'rip': renderRipPane(d); break;
+    case 'files': renderFilesTab(d); break;
+    case 'audio': renderAudioTab(d); break;
+    case 'check': renderScanPanel(d); break;
+    case 'burn': renderBurnBox(d); break;
+    case 'add': renderAppendBox(d); break;
+    case 'drive': renderDriveTab(d); break;
+  }
 }
 
 function dl(target, pairs) {
@@ -278,20 +457,58 @@ function dl(target, pairs) {
   }
 }
 
-function renderDiscTab(d) {
-  const disc = d.disc;
-  const empty = !disc || !disc.present;
-  el('discNone').hidden = !empty;
-  el('discBody').hidden = empty;
-  if (empty) {
-    el('discNone').textContent = (disc && disc.error) || d.error ||
-      'There is no disc in this drive. Put one in with the Close button on its card, or press Re-read.';
-    renderScanPanel(d);
-    renderBurnBox(d);
-    renderAppendBox(d);
-    return;
-  }
+/* ---------- the disc itself ---------- */
 
+// The heading is what is in the drive, in as few words as it takes. The
+// thirteen-row fact list this page used to show at all times is behind the
+// disclosure under it: one of those rows answers a question someone had,
+// and twelve of them are furniture.
+function renderDiscHead(d) {
+  const disc = d.disc;
+  const vol = d.volume;
+  const present = !!(disc && disc.present);
+
+  memo('dischead', [present, disc && disc.profileName, disc && disc.statusName,
+    disc && disc.sectors, disc && disc.dataBytes, disc && disc.audioTracks,
+    disc && disc.sessions, vol && vol.volumeId, vol && vol.format,
+    d.error, disc && disc.error], () => {
+    setText(el('discTitle'), present
+      ? ((vol && vol.volumeId) || (disc.profileName ? `a ${disc.profileName}` : 'a disc'))
+      : 'Nothing in the drive');
+    // An empty drive says so once, in the heading. The line under it is for
+    // what to do about it - or for a fault, which is the one case where the
+    // drive has something to say that the heading does not.
+    setText(el('discLine'), present ? discSummary(d)
+      : (d.error || 'Close the tray with the button on the drive above, or press Re-read.'));
+
+    const tags = [];
+    if (present) {
+      if (disc.profileName) tags.push(['chip', disc.profileName]);
+      if (vol && vol.format) tags.push(['chip', vol.format]);
+      if (disc.statusName) tags.push(['chip none', disc.statusName]);
+    }
+    sync(el('discTags'), tags, (t) => t[1],
+      () => text('span', '', 'chip'),
+      (node, t) => { setText(node, t[1]); node.className = t[0]; });
+
+    setHidden(el('discMore'), !present);
+    if (present) renderDiscFacts(d);
+  });
+}
+
+function discSummary(d) {
+  const disc = d.disc;
+  const bits = [];
+  if (disc.dataTracks && disc.dataBytes) bits.push(`${bytes(disc.dataBytes)} of data`);
+  if (disc.audioTracks) bits.push(`${disc.audioTracks} audio track${disc.audioTracks > 1 ? 's' : ''}`);
+  if (disc.sessions > 1) bits.push(`${disc.sessions} sessions`);
+  if (d.volume && d.volume.format) bits.push(`read as ${d.volume.format}`);
+  if (!bits.length) bits.push(disc.statusName || 'nothing readable on it');
+  return bits.join(' · ');
+}
+
+function renderDiscFacts(d) {
+  const disc = d.disc;
   const vol = d.volume;
   dl(el('discFacts'), [
     ['Disc', disc.profileName],
@@ -309,28 +526,30 @@ function renderDiscTab(d) {
     ['Names', vol ? namingScheme(vol) : null],
     ['Media id', disc.mediaId || null],
   ]);
+}
 
-  // The rip menu offers only what this disc and this drive can actually
-  // do, so nothing here fails after it is pressed.
-  const kinds = [];
-  if (d.canRipIso) kinds.push(['iso', '.iso - the filesystem, 2048 bytes a sector']);
-  if (d.canRipImg) kinds.push(['img', '.img - every byte on the disc, with a cue sheet']);
-  if (d.canRipAudio) kinds.push(['audio', '.wav - one file per audio track']);
-  const sel = el('ripKind');
-  const was = sel.value;
-  sel.textContent = '';
-  for (const [v, label] of kinds) {
-    const o = document.createElement('option');
-    o.value = v; o.textContent = label;
-    sel.appendChild(o);
-  }
-  if (kinds.some((k) => k[0] === was)) sel.value = was;
-  el('btnRip').disabled = kinds.length === 0;
-  el('ripLengthField').hidden = sel.value !== 'iso';
-  el('ripHint').textContent = ripHint(d);
-  renderScanPanel(d);
-  renderBurnBox(d);
-  renderAppendBox(d);
+function renderRipPane(d) {
+  memo('rip', [d.canRipIso, d.canRipImg, d.canRipAudio, d.busy,
+    d.browseError, d.disc && d.disc.present, d.disc && d.disc.profile], () => {
+    // The menu offers only what this disc and this drive can actually do,
+    // so nothing here fails after it is pressed.
+    const kinds = [];
+    if (d.canRipIso) kinds.push(['iso', '.iso - the filesystem, 2048 bytes a sector']);
+    if (d.canRipImg) kinds.push(['img', '.img - every byte on the disc, with a cue sheet']);
+    if (d.canRipAudio) kinds.push(['audio', '.wav - one file per audio track']);
+    const sel = el('ripKind');
+    const was = sel.value;
+    sel.textContent = '';
+    for (const [v, label] of kinds) {
+      const o = document.createElement('option');
+      o.value = v; o.textContent = label;
+      sel.appendChild(o);
+    }
+    if (kinds.some((k) => k[0] === was)) sel.value = was;
+    setDisabled(el('btnRip'), kinds.length === 0 || !!d.busy);
+    setHidden(el('ripLengthField'), sel.value !== 'iso');
+    setText(el('ripHint'), ripHint(d));
+  });
 }
 
 function ripHint(d) {
@@ -541,19 +760,30 @@ function wirePicker() {
 
 function renderBurnBox(d) {
   const allowed = state.status && state.status.allowBurn;
-  el('burnBox').hidden = !allowed;
   if (!allowed) return;
+  // Rebuilding this list every half second is what made the menu impossible
+  // to hold open and the row under the cursor flicker, so it is rebuilt only
+  // when something it shows has actually changed.
+  memo('burn', [d.canBurn, d.burnBlocker, d.busy,
+    d.disc && d.disc.present, d.disc && d.disc.erasable,
+    el('burnSource').value,
+    state.images.map((f) => `${f.name}:${f.size}`).join('|'),
+    state.isos.map((f) => `${f.name}:${f.size}`).join('|')],
+    () => drawBurnBox(d));
+}
+
+function drawBurnBox(d) {
   const blocked = !d.canBurn;
-  el('burnBlocked').hidden = !blocked;
-  el('burnFields').hidden = blocked;
+  setHidden(el('burnBlocked'), !blocked);
+  setHidden(el('burnFields'), blocked);
   if (blocked) {
-    el('burnBlocked').textContent = d.burnBlocker || 'This disc cannot be written to.';
+    setText(el('burnBlocked'), d.burnBlocker || 'This disc cannot be written to.');
   }
-  el('btnErase').hidden = !(d.disc && d.disc.present && d.disc.erasable);
+  setHidden(el('btnErase'), !(d.disc && d.disc.present && d.disc.erasable));
 
   // The library picker only appears when the server has a library.
   const hasISOs = !!(state.status && state.status.isoStore);
-  el('burnSource').parentElement.hidden = !hasISOs;
+  setHidden(el('burnSource').parentElement, !hasISOs);
   if (!hasISOs) el('burnSource').value = 'images';
 
   // The hidden <select> stays the one place the chosen name lives, so the
@@ -569,11 +799,11 @@ function renderBurnBox(d) {
     sel.appendChild(o);
   }
   sel.value = burnable.some((f) => f.name === was) ? was : '';
-  el('btnBurn').disabled = burnable.length === 0;
+  setDisabled(el('btnBurn'), burnable.length === 0 || !!d.busy);
   el('burnHint').textContent = burnable.length === 0
     ? (el('burnSource').value === 'isos'
         ? 'Nothing in the ISO library is a whole number of 2048-byte sectors.'
-        : 'No image in the store is a whole number of 2048-byte sectors. Upload an .iso, or convert a raw .img below.')
+        : 'No image in the store is a whole number of 2048-byte sectors. Upload an .iso to burn from.')
     : 'Everything that can be checked is checked before the laser is switched on. Afterwards every sector is read back and compared with the image.';
   renderPickButton();
   if (pickerOpen()) renderPickList();
@@ -649,15 +879,23 @@ function gradeClass(grade) {
 }
 
 function renderScanPanel(d) {
-  const box = el('scanResult');
   const running = state.jobs.some((j) => j.kind === 'scan' && j.drive === d.id && j.state === 'running');
-  el('btnScan').disabled = !!d.busy || !d.disc || !d.disc.present;
-  el('scanNote').textContent = running
+  setDisabled(el('btnScan'), !!d.busy || !d.disc || !d.disc.present);
+  setText(el('scanNote'), running
     ? 'Reading every sector. This takes about as long as ripping the disc.'
-    : 'Counts the bytes the drive\u2019s error correction could not fix. A disc reads perfectly right up until it does not \u2014 this is what shows the decline while there is still time to copy it.';
+    : 'Counts the bytes the drive\u2019s error correction could not fix. A disc reads perfectly right up until it does not \u2014 this is what shows the decline while there is still time to copy it.');
 
   const job = latestScan(d.id);
-  box.hidden = !job;
+  const r = job && job.scan;
+  // While a scan runs this really does change every tick, and is redrawn.
+  // A finished scan is drawn once and then left alone.
+  memo('scan', [job && job.id, job && job.state, job && job.done, job && job.total,
+    r && r.buckets, r && r.grade, r && r.score, r && r.running], () => drawScan(job));
+}
+
+function drawScan(job) {
+  const box = el('scanResult');
+  setHidden(box, !job);
   if (!job) return;
   const r = job.scan;
   const live = !!r.running;
@@ -785,13 +1023,15 @@ async function loadDiscs() {
 function renderDiscs() {
   const box = el('discs');
   box.textContent = '';
+  setText(el('discsSummary'), state.discs.length === 1
+    ? '1 disc checked before' : `${state.discs.length} discs checked before`);
   for (const d of state.discs) {
     const row = document.createElement('div');
     row.className = 'job';
 
     const head = document.createElement('div');
-    head.className = 'head';
-    head.appendChild(text('b', d.label || d.disc));
+    head.className = 'top';
+    head.appendChild(text('span', d.label || d.disc, 'what'));
     head.appendChild(text('span', gradeWords[d.latestGrade] || d.latestGrade, gradeClass(d.latestGrade)));
     head.appendChild(text('span', `${d.scans.length} check${d.scans.length > 1 ? 's' : ''}`, 'muted'));
     row.appendChild(head);
@@ -910,43 +1150,51 @@ const appendPicked = new Set();
 
 function renderAppendBox(d) {
   const allowed = state.status && state.status.allowBurn;
-  el('appendBox').hidden = !allowed;
   if (!allowed) return;
+  const free = (d.disc && d.disc.writableBytes) || 0;
+  // Ticking a file and having the tick vanish half a second later is what
+  // rebuilding this list on every snapshot did.
+  memo('append', [d.canAppend, d.appendBlocker, d.busy, free,
+    state.images.map((f) => `${f.name}:${f.size}`).join('|')],
+    () => drawAppendBox(d, free));
+  updateAppend(free);
+}
 
+function drawAppendBox(d, free) {
   const blocked = !d.canAppend;
-  el('appendBlocked').hidden = !blocked;
-  el('appendFields').hidden = blocked;
+  setHidden(el('appendBlocked'), !blocked);
+  setHidden(el('appendFields'), blocked);
   if (blocked) {
-    el('appendBlocked').textContent = d.appendBlocker || 'Files cannot be added to this disc.';
+    setText(el('appendBlocked'), d.appendBlocker || 'Files cannot be added to this disc.');
     return;
   }
 
-  const free = (d.disc && d.disc.writableBytes) || 0;
-  const rows = el('appendRows');
-  rows.textContent = '';
-  for (const f of state.images) {
+  sync(el('appendRows'), state.images, (f) => f.name, (f) => {
     const tr = document.createElement('tr');
     const tick = document.createElement('td');
     const box = document.createElement('input');
     box.type = 'checkbox';
-    box.checked = appendPicked.has(f.name);
     box.setAttribute('aria-label', `add ${f.name}`);
     box.addEventListener('change', () => {
       if (box.checked) appendPicked.add(f.name); else appendPicked.delete(f.name);
-      updateAppend(free);
+      updateAppend((state.detail && state.detail.disc && state.detail.disc.writableBytes) || 0);
     });
     tick.appendChild(box);
     tr.appendChild(tick);
-    tr.appendChild(text('td', f.name, 'wrapname'));
-    tr.appendChild(text('td', bytes(f.size), 'num'));
-    rows.appendChild(tr);
-  }
+    tr.appendChild(text('td', '', 'wrapname'));
+    tr.appendChild(text('td', '', 'num'));
+    return tr;
+  }, (tr, f) => {
+    const box = tr.querySelector('input');
+    if (box.checked !== appendPicked.has(f.name)) box.checked = appendPicked.has(f.name);
+    setText(tr.children[1], f.name);
+    setText(tr.children[2], bytes(f.size));
+  });
   // A file that has been deleted from the store since it was ticked must
   // not stay in the selection and then fail at the far end.
   for (const name of Array.from(appendPicked)) {
     if (!state.images.some((f) => f.name === name)) appendPicked.delete(name);
   }
-  updateAppend(free);
 }
 
 function appendSelectedBytes() {
@@ -1065,7 +1313,7 @@ function fileRow(id, e) {
   tr.appendChild(nameCell);
 
   tr.appendChild(text('td', e.isDir ? '' : bytes(e.size), 'num'));
-  tr.appendChild(text('td', when(e.modTime), 'num'));
+  tr.appendChild(text('td', when(e.modTime), 'num drop-col'));
 
   const act = document.createElement('td');
   act.className = 'act';
@@ -1176,13 +1424,22 @@ function updatePicked() {
 
 function renderAudioTab(d) {
   const tracks = (d.disc && d.disc.tracks || []).filter((t) => t.audio);
+  // Rebuilding this rebuilt the <audio> elements, which stopped whatever was
+  // playing and lost its position - twice a second, for as long as the tab
+  // was open.
+  memo('audio', [d.id, d.canRipAudio, d.disc && d.disc.present,
+    tracks.map((t) => `${t.number}:${t.durationSeconds}`).join('|')],
+    () => drawAudioTab(d, tracks));
+}
+
+function drawAudioTab(d, tracks) {
   const can = tracks.length > 0;
-  el('audioNone').hidden = can;
-  el('audioBody').hidden = !can;
+  setHidden(el('audioNone'), can);
+  setHidden(el('audioBody'), !can);
   if (!can) {
-    el('audioNone').textContent = d.disc && d.disc.present
+    setText(el('audioNone'), d.disc && d.disc.present
       ? 'There are no audio tracks on this disc.'
-      : 'There is no disc in this drive.';
+      : 'There is no disc in this drive.');
     return;
   }
   const id = d.id;
@@ -1221,6 +1478,12 @@ function renderAudioTab(d) {
 
 function renderDriveTab(d) {
   const c = d.capabilities;
+  memo('drive', [d.id, d.error, c && c.currentProfileName, c && c.currentReadSpeedKb,
+    c && (c.can || []).length, c && (c.cannot || []).length], () => drawDriveTab(d));
+}
+
+function drawDriveTab(d) {
+  const c = d.capabilities;
   if (!c) {
     el('driveFacts').textContent = '';
     el('can').textContent = '';
@@ -1252,88 +1515,109 @@ function renderDriveTab(d) {
 
 /* ---------- jobs ---------- */
 
+// Running jobs are what anyone is looking at; finished ones are a record,
+// and a record of forty of them does not belong above the thing you are
+// doing. So the running ones are listed, and the rest are behind a count.
 function renderJobs() {
-  const box = el('jobs');
-  box.textContent = '';
-  el('noJobs').hidden = state.jobs.length > 0;
-  for (const j of state.jobs) box.appendChild(jobRow(j));
+  const running = state.jobs.filter((j) => j.state === 'running');
+  const done = state.jobs.filter((j) => j.state !== 'running');
+
+  setHidden(el('noJobs'), running.length > 0);
+  sync(el('jobs'), running, (j) => j.id, createJob, updateJob);
+
+  setHidden(el('doneMore'), done.length === 0);
+  setText(el('doneSummary'), done.length === 1 ? '1 finished job'
+    : `${done.length} finished jobs`);
+  sync(el('doneJobs'), done, (j) => j.id, createJob, updateJob);
 }
 
-function jobRow(j) {
+// A job is built once and then only written into. Its shape does not depend
+// on its progress: the bar, the percentage and the line of figures are
+// always there, so a job at 4% and the same job at 100% are the same height
+// and nothing below them moves as it runs.
+function createJob(j) {
   const div = document.createElement('div');
   div.className = 'job';
 
-  const head = document.createElement('div');
-  head.className = 'head';
-  head.appendChild(text('b', j.label));
-  head.appendChild(text('span', j.state, 'chip' + (j.state === 'running' ? ' busy' : '')));
-  if (j.state === 'running') {
-    const stop = text('button', 'Stop');
-    stop.type = 'button';
-    stop.style.marginLeft = 'auto';
-    stop.addEventListener('click', async () => {
-      stop.disabled = true;
-      try { await post(`/api/jobs/${encodeURIComponent(j.id)}/cancel`); }
-      catch (e) { fail(String(e.message || e)); }
-    });
-    head.appendChild(stop);
-  }
-  div.appendChild(head);
+  const top = document.createElement('div');
+  top.className = 'top';
+  top.appendChild(text('span', '', 'what'));
+  top.appendChild(text('span', '', 'pct'));
+  const stop = text('button', 'Stop');
+  stop.type = 'button';
+  stop.className = 'stop';
+  stop.addEventListener('click', async () => {
+    stop.disabled = true;
+    try { await post(`/api/jobs/${encodeURIComponent(j.id)}/cancel`); }
+    catch (e) { fail(String(e.message || e)); }
+  });
+  top.appendChild(stop);
+  div.appendChild(top);
 
-  if (j.total > 0) {
-    const bar = document.createElement('div');
-    bar.className = 'bar' + (j.state === 'done' ? ' done' : (j.state === 'failed' ? ' bad' : ''));
-    const fillBar = document.createElement('i');
-    fillBar.style.width = `${Math.min(100, (j.done / j.total) * 100).toFixed(1)}%`;
-    bar.appendChild(fillBar);
-    bar.style.marginTop = '8px';
-    div.appendChild(bar);
-  }
+  const bar = document.createElement('div');
+  bar.className = 'bar';
+  bar.appendChild(document.createElement('i'));
+  div.appendChild(bar);
+
+  div.appendChild(text('p', '', 'meta'));
+  div.appendChild(text('p', '', 'meta says'));
+  div.appendChild(text('p', '', 'meta jobfail'));
+  div.appendChild(text('p', '', 'meta mono sum'));
+  const targets = document.createElement('div');
+  targets.className = 'targets';
+  div.appendChild(targets);
+  return div;
+}
+
+function updateJob(div, j) {
+  const running = j.state === 'running';
+  setText(div.querySelector('.what'), j.label);
+  setHidden(div.querySelector('.stop'), !running);
+
+  const bar = div.querySelector('.bar');
+  setHidden(bar, !(j.total > 0));
+  setClass(bar, 'done', j.state === 'done');
+  setClass(bar, 'bad', j.state === 'failed');
+  const share = j.total > 0 ? Math.min(100, (j.done / j.total) * 100) : 0;
+  setWidth(bar.firstChild, `${share.toFixed(1)}%`);
+  setText(div.querySelector('.pct'), j.total > 0 ? `${Math.round(share)}%` : j.state);
 
   const bits = [];
   if (j.phase) bits.push(j.phase);
   if (j.total > 0) bits.push(`${bytes(j.done)} of ${bytes(j.total)}`);
   if (j.bytesPerSec > 0) bits.push(rate(j.bytesPerSec));
-  if (j.state === 'running') {
+  if (running) {
     bits.push(`${since(j.started)} so far`);
     const left = eta(j.etaSeconds);
     if (left) bits.push(left);
   } else {
-    bits.push(when(j.started));
+    bits.push(`${j.state} · ${when(j.started)}`);
   }
   if (j.badSectors > 0) {
     bits.push(`${j.badSectors} unreadable sector${j.badSectors > 1 ? 's' : ''}` +
       (j.badRanges && j.badRanges.length ? ` at ${j.badRanges.slice(0, 4).join(', ')}` : ''));
   }
-  const meta = text('p', bits.join(' · '), 'meta');
-  div.appendChild(meta);
+  setText(div.querySelector('.meta'), bits.join(' · '));
 
-  if (j.message) div.appendChild(text('p', j.message, 'meta'));
-  if (j.error) {
-    const e = text('p', j.error, 'meta');
-    e.style.color = 'var(--accent)';
-    div.appendChild(e);
-  }
-  if (j.sha256) div.appendChild(text('p', `SHA-256 ${j.sha256}`, 'meta mono'));
+  const says = div.querySelector('.says');
+  setText(says, j.message || '');
+  setHidden(says, !j.message);
 
-  if (j.targets && j.targets.length) {
-    const row = document.createElement('p');
-    row.className = 'meta';
-    row.style.display = 'flex';
-    row.style.flexWrap = 'wrap';
-    row.style.gap = '6px';
-    for (const t of j.targets) {
-      const a = document.createElement('a');
-      a.className = 'btn';
-      a.style.fontSize = '11px';
-      a.style.padding = '3px 8px';
-      a.href = `/api/images/${encodeURIComponent(t)}`;
-      a.textContent = t;
-      row.appendChild(a);
-    }
-    div.appendChild(row);
-  }
-  return div;
+  const bad = div.querySelector('.jobfail');
+  setText(bad, j.error || '');
+  setHidden(bad, !j.error);
+
+  const sum = div.querySelector('.sum');
+  setText(sum, j.sha256 ? `SHA-256 ${j.sha256}` : '');
+  setHidden(sum, !j.sha256);
+
+  sync(div.querySelector('.targets'), j.targets || [], (t) => t, (t) => {
+    const a = document.createElement('a');
+    a.className = 'btn';
+    a.href = `/api/images/${encodeURIComponent(t)}`;
+    a.textContent = t;
+    return a;
+  }, () => {});
 }
 
 /* ---------- images ---------- */
@@ -1482,9 +1766,8 @@ async function startRip(kind, extra) {
 }
 
 function wireActions() {
-  for (const b of document.querySelectorAll('.tabs button')) {
-    b.addEventListener('click', () => setTab(b.dataset.tab));
-  }
+  // The pane buttons are built from what the disc can do, so they wire
+  // themselves as they are created; there is nothing static to bind here.
   el('ripKind').addEventListener('change', () => {
     el('ripLengthField').hidden = el('ripKind').value !== 'iso';
   });
@@ -1646,6 +1929,7 @@ function applySnapshot(snap) {
     state.path = '/';
     state.picked.clear();
     state.entries = [];
+    forgetDisc();
     loadDetail();
     return;
   }
@@ -1654,9 +1938,10 @@ function applySnapshot(snap) {
   if (state.detail) {
     Object.assign(state.detail, {
       disc: d.disc, busy: d.busy, canBurn: d.canBurn, burnBlocker: d.burnBlocker,
+      canAppend: d.canAppend, appendBlocker: d.appendBlocker,
       canRipIso: d.canRipIso, canRipImg: d.canRipImg, canRipAudio: d.canRipAudio,
     });
-    renderDiscTab(state.detail);
+    renderWork();
   }
 }
 
@@ -1678,7 +1963,9 @@ function watchJobsForImages() {
 function connect() {
   const es = new EventSource('/api/events');
   es.addEventListener('open', () => {
-    el('conn').textContent = 'live - every browser watching this server sees the same thing';
+    el('conn').className = 'conn live';
+    setText(el('conn'), 'live');
+    el('conn').title = 'Every browser watching this server sees the same drives and the same jobs.';
   });
   es.addEventListener('message', (ev) => {
     try {
@@ -1688,7 +1975,8 @@ function connect() {
     } catch (e) { /* a malformed frame is not worth tearing the page down for */ }
   });
   es.addEventListener('error', () => {
-    el('conn').textContent = 'reconnecting…';
+    el('conn').className = 'conn off';
+    setText(el('conn'), 'reconnecting');
   });
 }
 
