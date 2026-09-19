@@ -27,6 +27,9 @@ service account is in the `cdrom` group.
     or re-encoded.
   - **single files**, straight off the disc's filesystem. One file is
     written as itself; several are wrapped in the archive format you pick.
+    Anything taken off a disc — a file, a folder, a ticked selection — can
+    go to the browser or into the image store, under whatever name you give
+    it.
 - **Checks a disc's health.** Reads every sector and counts the bytes the
   drive's error correction could not fix — C2 error pointers, the only
   portable measure there is. A disc reads perfectly right up until it does
@@ -316,6 +319,31 @@ several pieces, which is handled where an ISO 9660 file never needs it.
 Reading is implemented, not writing: the virtual and sparable partition maps
 that packet-written rewritable media use belong to a disc being written a
 block at a time, which is not a disc anyone is ripping.
+
+### Writing an archive back to a disc
+
+Ripping a disc's files gives one archive, which is the right thing to keep
+and the wrong thing to burn: a disc with a single `.zip` on it is not the
+disc that was ripped. So choosing an archive in the burn menu unpacks it and
+writes what was inside as a filesystem — the disc that comes out is the disc
+that went in.
+
+The archives it reads are the ones it writes: `.zip`, `.tar`, `.tar.gz`,
+`.tar.xz`, `.tar.bz2` and their short spellings. A `.rar` or a `.7z` would
+need a library or an external program, and is refused by name rather than
+half-attempted.
+
+Everything about the paths inside an archive is treated as hostile, because
+an entry called `../../etc/passwd` is a real thing that real archives
+contain. Absolute paths and `..` are refused outright rather than cleaned —
+cleaning a traversal does not refuse it, it silently rewrites it into a
+different file, which is worse. A symbolic link may use `..` and stay on the
+disc, so link targets are counted rather than banned.
+
+It is checked the way a burn is checked: every file is hashed as it is
+unpacked, and read back off the finished disc and compared. The size of what
+is in an archive is not known until it has been opened, so the check that it
+fits happens after the unpacking — still before the laser.
 
 ### Appending
 

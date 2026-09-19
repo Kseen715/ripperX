@@ -123,7 +123,13 @@ type burnRequest struct {
 	// default, because a burn nobody checked is a burn nobody can trust.
 	Verify *bool `json:"verify,omitempty" doc:"read the disc back and compare it with the image; defaults to true"`
 	Eject  bool  `json:"eject,omitempty" doc:"open the tray when everything is finished"`
+	// Unpack writes the files inside an archive rather than the archive
+	// itself. It is how a disc ripped into one archive is written back out
+	// as a disc: without it the result is a disc with a .zip on it.
+	Unpack bool `json:"unpack,omitempty" doc:"for an archive: write the files inside it as a filesystem, not the archive file"`
 }
+
+var errNoBurner = errors.New("no burner program is installed")
 
 // handleBurn checks the request before it checks the disc. The order
 // matters to whoever is standing at the drive: everything wrong with the
@@ -148,6 +154,10 @@ func (s *server) handleBurn(w http.ResponseWriter, r *http.Request) {
 	}
 	if !validName(req.Image) {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: errBadName.Error()})
+		return
+	}
+	if req.Unpack {
+		s.burnArchive(w, req, d, src)
 		return
 	}
 	f, info, err := src.Open(req.Image)
@@ -226,6 +236,73 @@ func (s *server) handleBurn(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, ripResponse{Job: *job})
 }
 
+// burnArchive is the preflight for writing the files inside an archive. It
+// checks what it can before the disc is touched; how much is in the archive
+// is not one of those things, so that check happens in the job, after the
+// unpacking and still before the laser.
+func (s *server) burnArchive(w http.ResponseWriter, req burnRequest, d *drive, src store) {
+	if !isArchive(req.Image) {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: fmt.Sprintf(
+			"%s is not an archive ripperX can unpack; it reads %s",
+			req.Image, strings.Join(readableArchives(), ", "))})
+		return
+	}
+	if req.Dummy {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "a rehearsal writes an image " +
+			"with the laser off, and there is no image here: these files are turned into a " +
+			"filesystem as they are written. Burn it for real, or burn an .iso instead."})
+		return
+	}
+	info, err := statImage(src, req.Image)
+	if err != nil {
+		code := http.StatusInternalServerError
+		if errors.Is(err, errNoSuchImage) {
+			code = http.StatusNotFound
+		}
+		writeJSON(w, code, errorResponse{Error: err.Error()})
+		return
+	}
+
+	caps, disc, err := d.state(2 * time.Second)
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, err)
+		return
+	}
+	// Unlike an image burn, this writes a session rather than the whole
+	// disc, so a disc with room left on it will do as well as a blank one.
+	// Only when it is neither is there nothing to be done.
+	if why, also := s.burnBlocker(caps, disc), s.appendBlocker(caps, disc); why != "" && also != "" {
+		writeJSON(w, http.StatusConflict, errorResponse{Error: why})
+		return
+	}
+
+	verify := true
+	if req.Verify != nil {
+		verify = *req.Verify
+	}
+	job, err := s.jobs.startOnDrive(d, "burn",
+		fmt.Sprintf("%s unpacked to %s", req.Image, d.id), info.Size,
+		func(ctx context.Context, rec *jobRecord) error {
+			return s.burnFiles(ctx, rec, d, src, info, disc, req, verify)
+		})
+	if err != nil {
+		writeJSON(w, http.StatusConflict, errorResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusAccepted, ripResponse{Job: *job})
+}
+
+// statImage is what the size of a file in a store costs: opening it and
+// closing it again.
+func statImage(src store, name string) (storedFile, error) {
+	f, info, err := src.Open(name)
+	if err != nil {
+		return storedFile{}, err
+	}
+	f.Close()
+	return info, nil
+}
+
 // sectorComplaint says why a file is not a disc image, and says the useful
 // thing when it is a raw one.
 func sectorComplaint(info storedFile) string {
@@ -260,7 +337,7 @@ func checkImageFits(info storedFile, disc *mmc.Disc) error {
 
 func (s *server) burn(ctx context.Context, rec *jobRecord, d *drive, src store, info storedFile, req burnRequest, verify bool) error {
 	if s.burner == nil {
-		return errors.New("no burner program is installed")
+		return errNoBurner
 	}
 
 	// The burner is a separate process and needs a path, so an image on a

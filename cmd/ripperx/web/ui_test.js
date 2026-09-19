@@ -39,7 +39,20 @@ const status = {
   burner: '/usr/bin/xorriso', burnerKind: 'xorriso', allowBurn: true,
   allowEject: true, authOn: false, isoStore: '//nas/iso', uploadMax: 1 << 30,
 };
-const images = { files: [{ name: 'disc.iso', size: 2048 * 100, modTime: '2026-01-01T00:00:00Z', needs: 'CD', aligned: true }], store: '//nas/images', kind: 'smb' };
+// A store with hundreds of files in it, which is the case the images panel
+// has to survive, plus the archive a ripped disc becomes.
+const manyImages = [];
+for (let i = 1; i <= 250; i++) {
+  manyImages.push({
+    name: `img-${String(i).padStart(4, '0')}.iso`, size: 2048 * (100 + i),
+    modTime: '2026-01-01T00:00:00Z', needs: 'CD', aligned: true,
+  });
+}
+manyImages.push({
+  name: 'Terminator-5v1-20260919.zip', size: 3_900_000_000,
+  modTime: '2026-01-02T00:00:00Z', needs: 'dual-layer DVD',
+});
+const images = { files: manyImages, store: '//nas/images', kind: 'smb' };
 const isos = {
   files: [{
     name: 'debian.iso', size: 2048 * 500, modTime: '2026-01-01T00:00:00Z',
@@ -79,6 +92,7 @@ window.XMLHttpRequest = class { open() {} send() {} setRequestHeader() {} upload
 // What is in the drive right now, so the detail endpoint answers the same
 // thing the event stream is saying.
 let loaded = true;
+let burnable = false;
 
 function disc(present = true) {
   return present ? {
@@ -91,7 +105,7 @@ function drive(present = true, busy = false) {
   return {
     id: 'sr0', path: '/dev/sr0', name: 'HL-DT-ST BD-RE', busy,
     disc: disc(present), canRipIso: present, canRipImg: false, canRipAudio: false,
-    canBrowse: present, canBurn: false, burnBlocker: 'this disc cannot be written to',
+    canBrowse: present, canBurn: burnable, burnBlocker: 'this disc cannot be written to',
     canAppend: false, appendBlocker: 'this disc is closed',
   };
 }
@@ -190,6 +204,64 @@ const settle = () => new Promise((r) => setTimeout(r, 30));
   const segs2 = Array.from(doc.getElementById('seg').children).map((b) => b.dataset.key);
   check('an empty drive offers only what applies', !segs2.includes('rip') && !segs2.includes('files'),
     JSON.stringify(segs2));
+
+  // ---- a store with hundreds of files in it ----
+  loaded = true;
+  push(snapshot([]));
+  await settle();
+  check('only the first page of images is drawn',
+    doc.querySelectorAll('#imageRows tr').length === 100,
+    `${doc.querySelectorAll('#imageRows tr').length} rows`);
+  check('the count says what is being shown',
+    doc.getElementById('imageCount').textContent === '100 of 251 images',
+    doc.getElementById('imageCount').textContent);
+  doc.getElementById('imageMore').click();
+  await settle();
+  check('the rest can be asked for',
+    doc.querySelectorAll('#imageRows tr').length === 251,
+    `${doc.querySelectorAll('#imageRows tr').length} rows`);
+
+  const filter = doc.getElementById('imageFilter');
+  filter.value = 'terminator';
+  filter.dispatchEvent(new window.Event('input'));
+  await settle();
+  check('the filter narrows the list',
+    doc.querySelectorAll('#imageRows tr').length === 1,
+    `${doc.querySelectorAll('#imageRows tr').length} rows`);
+  check('the count says how much was filtered out',
+    doc.getElementById('imageCount').textContent === '1 of 251 images',
+    doc.getElementById('imageCount').textContent);
+  filter.value = '';
+  filter.dispatchEvent(new window.Event('input'));
+  await settle();
+
+  // ---- an archive is burnable, as the files inside it ----
+  burnable = true;
+  push(snapshot([]));
+  await settle();
+  await settle();
+  doc.getElementById('seg').querySelector('[data-key=burn]').click();
+  await settle();
+  doc.getElementById('burnPick').click();
+  await settle();
+  const rows = Array.from(doc.querySelectorAll('#burnList .pick-opt'));
+  const archiveRow = rows.find((r) => r.textContent.includes('Terminator-5v1-20260919.zip'));
+  check('an archive is offered in the burn menu', !!archiveRow,
+    `${rows.length} rows offered`);
+  check('and is marked as what will happen to it',
+    archiveRow && archiveRow.textContent.includes('unpacked to files'),
+    archiveRow && archiveRow.textContent);
+
+  archiveRow.click();
+  await settle();
+  check('choosing it says the disc gets the files',
+    doc.getElementById('burnBoot').textContent.includes('files inside it'),
+    doc.getElementById('burnBoot').textContent);
+
+  // ---- naming what comes out ----
+  doc.getElementById('seg').querySelector('[data-key=files]').click();
+  await settle();
+  check('the take dialog asks for a name', !!doc.getElementById('archiveName'));
 
   check('nothing threw', errors.length === 0, errors.join('\n'));
   console.log(failures ? `\n${failures} failed` : '\nall good');

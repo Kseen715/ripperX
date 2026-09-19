@@ -280,19 +280,61 @@ func (s *server) appendFiles(ctx context.Context, rec *jobRecord, d *drive, src 
 var xorrisoPercent = regexp.MustCompile(`Writing:\s+\S+\s+([0-9]+\.[0-9]+)%`)
 
 func (s *server) runAppend(ctx context.Context, rec *jobRecord, dev string, files []storedFile, staged []string, folder string, closeDisc bool) error {
-	// xorriso's own interface rather than its cdrecord emulation: the
-	// emulation writes whole images, and what is wanted here is to load the
-	// filesystem that is already on the disc and add to it.
+	maps := make([][2]string, 0, len(files))
+	for i, f := range files {
+		maps = append(maps, [2]string{staged[i], path.Join(folder, f.Name)})
+	}
+	var total int64
+	for _, f := range files {
+		total += f.Size
+	}
+	return s.author(ctx, rec, authorJob{
+		dev: dev, maps: maps, total: total, closeDisc: closeDisc,
+		failed: "xorriso could not add to this disc",
+	})
+}
+
+// authorJob is a write that builds a filesystem on the disc rather than
+// copying an image onto it. Two things need that: adding files to a disc
+// that already has some, and burning an archive as the files inside it.
+type authorJob struct {
+	dev string
+	// maps are what to write and where: a local path, and the path it takes
+	// on the disc. A local directory is written with everything under it.
+	maps  [][2]string
+	total int64
+	// volume is the label to give a disc being written from nothing. It is
+	// left empty when adding to a disc, where the label already exists and
+	// renaming it is not what was asked for.
+	volume    string
+	speedX    int
+	closeDisc bool
+	// failed begins the error if xorriso does.
+	failed string
+}
+
+// author runs xorriso's own interface rather than its cdrecord emulation:
+// the emulation writes whole images, and what is wanted here is to load
+// whatever filesystem the disc already has and write a session with more in
+// it. On a blank disc that is the first session and there is nothing to
+// load, which is the same command with nothing to find.
+func (s *server) author(ctx context.Context, rec *jobRecord, j authorJob) error {
 	args := []string{
 		"-abort_on", "FATAL",
 		// Loading the existing image is what makes the old files stay
 		// visible in the new session.
-		"-dev", dev,
+		"-dev", j.dev,
 	}
-	for i, f := range files {
-		args = append(args, "-map", staged[i], path.Join(folder, f.Name))
+	if j.speedX > 0 {
+		args = append(args, "-speed", fmt.Sprintf("%dx", j.speedX))
 	}
-	if closeDisc {
+	if j.volume != "" {
+		args = append(args, "-volid", j.volume)
+	}
+	for _, m := range j.maps {
+		args = append(args, "-map", m[0], m[1])
+	}
+	if j.closeDisc {
 		args = append(args, "-close", "on")
 	}
 	args = append(args, "-commit", "-eject", "off")
@@ -307,10 +349,7 @@ func (s *server) runAppend(ctx context.Context, rec *jobRecord, dev string, file
 		return fmt.Errorf("starting %s: %w", s.burner.path, err)
 	}
 
-	var total int64
-	for _, f := range files {
-		total += f.Size
-	}
+	total := j.total
 	var tail []string
 	sc := bufio.NewScanner(stderr)
 	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
@@ -343,7 +382,11 @@ func (s *server) runAppend(ctx context.Context, rec *jobRecord, dev string, file
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		return fmt.Errorf("xorriso could not add to this disc: %w\n%s", err, strings.Join(tail, "\n"))
+		what := j.failed
+		if what == "" {
+			what = "xorriso could not write this disc"
+		}
+		return fmt.Errorf("%s: %w\n%s", what, err, strings.Join(tail, "\n"))
 	}
 	return nil
 }

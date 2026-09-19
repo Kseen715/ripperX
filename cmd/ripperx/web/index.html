@@ -300,6 +300,15 @@
 
   .label-as { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .1em; }
 
+  /* A store with hundreds of images in it is a store nobody scrolls. */
+  .findbox {
+    font: inherit; font-size: 13px; padding: 6px 9px; flex: 1 1 160px; min-width: 0;
+    background: var(--panel); color: var(--ink); border: 1px solid var(--line);
+  }
+  /* An archive can be burned as the files inside it, which is a different
+     thing from burning an image and is marked as one. */
+  .tag-x.pack { border-color: var(--ink-2); color: var(--ink); font-weight: 700; }
+
   .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
   .cols ul { margin: 0; padding-left: 18px; font-size: 12px; }
   .cols li { margin-bottom: 5px; }
@@ -496,6 +505,11 @@
       <div id="appendBlocked" class="muted" style="font-size:12px" hidden></div>
       <div id="appendFields" hidden>
         <p class="muted" id="appendRoom" style="font-size:12px;margin:0 0 12px"></p>
+        <div class="row" style="margin-bottom:10px">
+          <input type="search" id="appendFilter" class="findbox" autocomplete="off"
+                 placeholder="Filter by name" aria-label="Filter the images">
+          <span class="muted" id="appendCount" style="font-size:11px;white-space:nowrap"></span>
+        </div>
         <div class="scroll" style="max-height:200px;margin-bottom:14px">
           <table>
             <thead><tr>
@@ -608,11 +622,19 @@
       </label>
       <div class="bar" id="upBar" hidden style="margin-top:10px"><i></i></div>
       <p class="muted mono" id="upNote" hidden style="font-size:11px;margin:6px 0 0"></p>
-      <div class="scroll" style="margin-top:14px">
+      <div class="row" style="margin-top:14px">
+        <input type="search" id="imageFilter" class="findbox" autocomplete="off"
+               placeholder="Filter by name" aria-label="Filter the images">
+        <span class="muted" id="imageCount" style="font-size:11px;white-space:nowrap"></span>
+      </div>
+      <div class="scroll" style="margin-top:10px">
         <table>
           <thead><tr><th>Name</th><th class="num">Size</th><th></th></tr></thead>
           <tbody id="imageRows"></tbody>
         </table>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button id="imageMore" hidden>Show the rest</button>
       </div>
       <p class="muted" id="noImages" hidden style="font-size:12px;margin:10px 0 0">
         Nothing here yet. Rip a disc, or upload an image to burn.
@@ -642,9 +664,13 @@
   <form method="dialog" class="body">
     <h2 id="archiveTitle">Download archive</h2>
     <p class="muted" id="archiveWhat" style="font-size:12px;margin:0"></p>
+    <p class="label-as" style="margin:14px 0 6px">Call it</p>
+    <input id="archiveName" type="text" autocomplete="off"
+           style="font:inherit;font-size:13px;width:100%;padding:8px 9px;background:var(--panel);color:var(--ink);border:1px solid var(--line)">
+    <p class="muted" id="archiveNameNote" style="font-size:11px;margin:5px 0 0"></p>
     <p class="label-as" style="margin:14px 0 0">Where it goes</p>
     <div class="fmt" id="archiveWhere"></div>
-    <p class="label-as" style="margin:0">Archive as</p>
+    <p class="label-as" id="archiveFormatsLabel" style="margin:0">Archive as</p>
     <div class="fmt" id="archiveFormats"></div>
     <div class="row" style="justify-content:flex-end">
       <button value="cancel">Cancel</button>

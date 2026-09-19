@@ -225,7 +225,8 @@ func (s *server) handleDiscFile(w http.ResponseWriter, r *http.Request) {
 	err = d.borrow(func(dev *mmc.Drive) error {
 		w.Header().Set("Accept-Ranges", "bytes")
 		w.Header().Set("Content-Type", contentType(entry.Name))
-		w.Header().Set("Content-Disposition", contentDisposition(r, path.Base(entry.Path)))
+		w.Header().Set("Content-Disposition",
+			contentDisposition(r, downloadName(r, path.Base(entry.Path))))
 
 		out := http.ResponseWriter(w)
 		if trackable(r) {
@@ -286,14 +287,16 @@ func (s *server) handleDiscArchive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	name := safeName(strings.TrimPrefix(path.Clean(p), "/"), "")
+	name := requestedName(r, "")
+	if name == "" {
+		name = safeName(strings.TrimPrefix(path.Clean(p), "/"), "")
+	}
 	if name == "" {
 		name = safeName(fsys.Volume().VolumeID, "disc")
 	}
 	err = d.borrow(func(dev *mmc.Drive) error {
 		w.Header().Set("Content-Type", format.MediaType)
-		w.Header().Set("Content-Disposition",
-			fmt.Sprintf("attachment; filename=%q", name+format.Extension))
+		w.Header().Set("Content-Disposition", contentDisposition(r, name+format.Extension))
 
 		// Measured in the bytes read off the disc, not the bytes sent: a
 		// compressed archive has no length until it is finished.
@@ -432,6 +435,27 @@ func externalBase(r *http.Request) string {
 // contentDisposition decides whether a browser plays a file or saves it.
 // The page asks for one or the other explicitly, because guessing is what
 // produces a video that downloads instead of playing.
+// requestedName is the name the caller asked the result be called. It is a
+// name, not a path: it goes through safeName like every other name ripperX
+// invents, so a request cannot choose where its own download lands.
+func requestedName(r *http.Request, fallback string) string {
+	return safeName(r.URL.Query().Get("name"), fallback)
+}
+
+// downloadName keeps the extension the file has when a new name is given
+// without one, so renaming "VTS_01_1.VOB" to "opening scene" still produces
+// something a player will open.
+func downloadName(r *http.Request, actual string) string {
+	want := requestedName(r, "")
+	if want == "" {
+		return actual
+	}
+	if path.Ext(want) == "" {
+		want += path.Ext(actual)
+	}
+	return want
+}
+
 func contentDisposition(r *http.Request, name string) string {
 	kind := "attachment"
 	if r.URL.Query().Get("inline") == "1" {
