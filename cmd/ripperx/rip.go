@@ -223,6 +223,7 @@ type sink struct {
 	name   string
 	offset int64 // bytes already counted towards the job before this file
 	n      int64
+	closed bool
 }
 
 func (s *server) newSink(rec *jobRecord, name string, offset int64) (*sink, error) {
@@ -263,7 +264,22 @@ func (p plainSink) Write(b []byte) (int, error) {
 
 func (k *sink) sum() string { return hex.EncodeToString(k.hash.Sum(nil)) }
 
-func (k *sink) Close() error { return k.w.Close() }
+// Close is idempotent, because every writer here closes the sink to find
+// out whether the file landed and then closes it again from a deferred
+// cleanup that cannot know it already happened.
+//
+// A second close of a local file is harmless. A second close of a file on
+// an SMB share unmounts an unmounted share and logs off a logged-off
+// session, and that hangs - so a rip to a share wrote its file correctly
+// and then never finished, holding the drive and reaching neither the
+// history nor the page. Nothing but a share shows it.
+func (k *sink) Close() error {
+	if k.closed {
+		return nil
+	}
+	k.closed = true
+	return k.w.Close()
+}
 
 // ripImage reads a run of sectors straight to a file. raw picks between the
 // 2048 bytes a filesystem sees and the 2352 bytes actually on the disc.

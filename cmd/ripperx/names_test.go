@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -151,3 +152,34 @@ func TestBusyDrivesAreAConflictNotABadRequest(t *testing.T) {
 		}
 	}
 }
+
+// Every writer closes the sink to learn whether the file landed, and then a
+// deferred cleanup closes it again. On a local file that is harmless; on an
+// SMB share the second close hangs, so a rip to a share wrote its file and
+// then never finished. The sink has to tolerate it.
+func TestSinkCloseIsIdempotent(t *testing.T) {
+	counter := &countingCloser{}
+	k := &sink{w: counter, hash: sha256.New(), rec: &jobRecord{}}
+
+	if _, err := k.Write([]byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.Close(); err != nil {
+		t.Errorf("the second close returned %v, want nil", err)
+	}
+	if counter.closes != 1 {
+		t.Errorf("the underlying file was closed %d times, want once", counter.closes)
+	}
+	// The hash is still whatever was written, closed or not.
+	if k.sum() != "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824" {
+		t.Errorf("hash came out as %s", k.sum())
+	}
+}
+
+type countingCloser struct{ closes int }
+
+func (c *countingCloser) Write(p []byte) (int, error) { return len(p), nil }
+func (c *countingCloser) Close() error                { c.closes++; return nil }
