@@ -129,8 +129,18 @@ h1 {
 button, select, a.btn {
   font: inherit; font-size: 13px; padding: 7px 13px; background: var(--panel);
   color: var(--ink); border: 1px solid var(--line); cursor: pointer;
-  text-decoration: none; display: inline-block;
+  text-decoration: none;
 }
+/* Centred rather than inline-block, because a <button> centres its own
+   label and an <a class=btn> does not: give both a minimum height - which
+   is what a touch target is - and the anchor's text sits at the top of its
+   box while the button's sits in the middle. Side by side that reads as two
+   buttons of different sizes with the words at different heights. */
+button, a.btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  text-align: center;
+}
+select { display: inline-block; }
 button, a.btn { position: relative; }
 /* 45-degree corner mark; currentColor keeps it grayscale on plain buttons and
    ink-on-accent on primary ones. */

@@ -130,6 +130,26 @@ try {
 check('app.js evaluates', true);
 
 const doc = window.document;
+
+// jsdom has <dialog> as an element but not its modal behaviour, and does not
+// submit a form[method=dialog] on a button press. Both are supplied here so
+// the test exercises the page's own logic rather than the browser's: what is
+// being checked is that nothing irreversible happens without being asked,
+// not that <dialog> works.
+for (const dlg of doc.querySelectorAll('dialog')) {
+  dlg.showModal = function () { this.open = true; };
+  dlg.close = function (value) {
+    if (value !== undefined) this.returnValue = value;
+    this.open = false;
+    this.dispatchEvent(new window.Event('close'));
+  };
+}
+for (const b of doc.querySelectorAll('dialog form[method=dialog] button')) {
+  b.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    b.closest('dialog').close(b.value);
+  });
+}
 const push = (snap) => sse.emit('message', { data: JSON.stringify(snap) });
 const settle = () => new Promise((r) => setTimeout(r, 30));
 
@@ -275,6 +295,44 @@ const settle = () => new Promise((r) => setTimeout(r, 30));
   doc.getElementById('seg').querySelector('[data-key=files]').click();
   await settle();
   check('the take dialog asks for a name', !!doc.getElementById('archiveName'));
+
+  // ---- nothing irreversible happens without being asked ----
+  filter.value = 'Terminator';
+  filter.dispatchEvent(new window.Event('input'));
+  await settle();
+  const deletes = [];
+  const realFetch = window.fetch;
+  window.fetch = async (url, opts) => {
+    if (opts && opts.method === 'DELETE') deletes.push(String(url));
+    return realFetch(url, opts);
+  };
+  const row = doc.querySelector('#imageRows tr');
+  const del = Array.from(row.querySelectorAll('button')).find((b) => b.textContent === 'Delete');
+  check('an image can be deleted', !!del);
+
+  del.click();
+  await settle();
+  const dlg = doc.getElementById('confirmDialog');
+  check('deleting asks first', dlg.open === true);
+  check('and says what it is about to delete',
+    doc.getElementById('confirmWhat').textContent.includes('Terminator'),
+    doc.getElementById('confirmWhat').textContent);
+  check('and that it cannot be undone',
+    !doc.getElementById('confirmWarn').hidden);
+  check('with the safe button holding the focus',
+    doc.activeElement === doc.getElementById('confirmNo'),
+    doc.activeElement && doc.activeElement.id);
+
+  doc.getElementById('confirmNo').click();
+  await settle();
+  check('saying no deletes nothing', deletes.length === 0, deletes.join(', '));
+
+  del.click();
+  await settle();
+  doc.getElementById('confirmGo').click();
+  await settle();
+  check('saying yes deletes it', deletes.length === 1, `${deletes.length} requests`);
+  window.fetch = realFetch;
 
   check('nothing threw', errors.length === 0, errors.join('\n'));
   console.log(failures ? `\n${failures} failed` : '\nall good');

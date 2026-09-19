@@ -29,9 +29,11 @@
   }
   .drive + .drive { margin-top: 8px; }
   .drive.on { border-color: var(--line); border-left: 4px solid var(--accent); padding-left: 9px; }
+  /* Block, not the inline-flex every other button is: this one holds two
+     lines - the drive's name and what is in it - and they stack. */
   .drive .pick {
-    flex: 1 1 220px; min-width: 0; border: 0; background: none; padding: 0;
-    font: inherit; text-align: left; cursor: pointer; color: inherit;
+    display: block; flex: 1 1 220px; min-width: 0; border: 0; background: none;
+    padding: 0; font: inherit; text-align: left; cursor: pointer; color: inherit;
   }
   .drive .pick::after { display: none; }
   .drive .pick:hover .dname { color: var(--accent); }
@@ -355,6 +357,33 @@
     /* A menu wider than the screen is a menu with a horizontal scrollbar
        under it. At this width it is exactly as wide as the field. */
     .pick-pop { width: 100%; max-width: 100%; }
+
+    /* A table of five columns does not fit a phone. Three of them are a
+       name that has to wrap, a number, and two buttons, so the row becomes
+       what it always was: a line of text with its actions under it. */
+    .stacked thead { display: none; }
+    .stacked, .stacked tbody, .stacked tr, .stacked td { display: block; }
+    .stacked tr {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px;
+      padding: 12px 0; border-bottom: 1px solid var(--hair);
+    }
+    .stacked tr:last-child { border-bottom: 0; }
+    .stacked td { border: 0; padding: 0; }
+    /* The name gets the first line to itself, because on this screen it is
+       three lines of a wrapped file name and nothing fits beside it. */
+    .stacked td.wrapname, .stacked td.name { flex: 1 1 100%; font-size: 13px; }
+    .stacked td.num { flex: 0 0 auto; color: var(--muted); font-size: 12px; }
+    .stacked td.act {
+      flex: 1 1 auto; display: flex; gap: 8px; align-items: stretch; justify-content: flex-end;
+    }
+    /* Equal widths, so a row of actions is a row of the same button twice
+       rather than two of different sizes. They fill what the size figure
+       leaves, which is also the biggest target they can be. */
+    .stacked td.act > * { margin-left: 0; flex: 1 1 0; min-width: 0; }
+    /* The tick stays with the name rather than taking a line of its own. */
+    .stacked td:has(> input[type=checkbox]) { flex: 0 0 auto; order: -1; }
+    .stacked td:has(> input[type=checkbox]) + td.wrapname { flex: 1 1 60%; }
+    .stacked td:has(> audio) { flex: 1 1 100%; }
   }
 </style>
 </head>
@@ -521,7 +550,7 @@
           <span class="muted" id="appendCount" style="font-size:11px;white-space:nowrap"></span>
         </div>
         <div class="scroll" style="max-height:200px;margin-bottom:14px">
-          <table>
+          <table class="stacked">
             <thead><tr>
               <th style="width:1%"></th><th>File</th><th class="num">Size</th>
             </tr></thead>
@@ -561,7 +590,7 @@
           <span class="muted" id="selNote" style="font-size:11px"></span>
         </div>
         <div class="scroll">
-          <table>
+          <table class="stacked">
             <thead><tr>
               <th style="width:1%"><input type="checkbox" id="selAll" aria-label="select everything here"></th>
               <th>Name</th><th class="num">Size</th><th class="num drop-col">Changed</th><th></th>
@@ -579,7 +608,7 @@
           <button id="btnRipAudio" class="primary">Rip every track to .wav</button>
           <a id="btnM3U" class="btn">Playlist for VLC</a>
         </div>
-        <table>
+        <table class="stacked">
           <thead><tr><th>Track</th><th class="num">Length</th><th>Play</th><th></th></tr></thead>
           <tbody id="trackRows"></tbody>
         </table>
@@ -644,7 +673,7 @@
         <span class="muted" id="imageCount" style="font-size:11px;white-space:nowrap"></span>
       </div>
       <div class="scroll" style="margin-top:10px">
-        <table>
+        <table class="stacked">
           <thead><tr><th>Name</th><th class="num">Size</th><th></th></tr></thead>
           <tbody id="imageRows"></tbody>
         </table>
@@ -675,6 +704,23 @@
     and what it wrote is read back and checked here.
   </p>
 </div>
+
+<!-- Asking before something that cannot be undone. Not window.confirm:
+     a browser suppresses those after a few ("prevent this page from
+     creating additional dialogs"), and a suppressed confirm returns false
+     without saying so - which turns "are you sure?" into a button that
+     quietly stops working. -->
+<dialog id="confirmDialog">
+  <form method="dialog" class="body">
+    <h2 id="confirmTitle">Are you sure?</h2>
+    <p id="confirmWhat" style="margin:10px 0 0;font-size:13px;white-space:pre-wrap"></p>
+    <p id="confirmWarn" class="warn" hidden style="margin:12px 0 0"></p>
+    <div class="row" style="justify-content:flex-end;margin-top:18px">
+      <button value="cancel" id="confirmNo" autofocus>Cancel</button>
+      <button value="ok" class="primary" id="confirmGo">Yes</button>
+    </div>
+  </form>
+</dialog>
 
 <dialog id="archiveDialog">
   <form method="dialog" class="body">

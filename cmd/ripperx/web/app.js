@@ -177,6 +177,41 @@ function setWidth(node, w) {
   if (node.style.width !== w) node.style.width = w;
 }
 
+/* ---------- asking first ---------- */
+
+// ask() is window.confirm, in the page's own clothes and with the page's
+// own guarantees.
+//
+// The browser's confirm is not one of them. After a few dialogs a browser
+// offers to stop a page creating more, and once that is on, confirm returns
+// false without showing anything - so "are you sure?" becomes a button that
+// silently does nothing, and the user is left pressing Delete at a list
+// that will not change. It is also the one piece of this page that cannot
+// be styled, cannot say more than one line, and on a phone appears at the
+// top of the screen away from the thumb that asked for it.
+//
+// Cancel holds the focus, so a stray Enter or a double tap lands on the
+// safe one. Every caller here is asking about something that cannot be
+// undone.
+function ask({ title, what, action, danger }) {
+  const dlg = el('confirmDialog');
+  setText(el('confirmTitle'), title || 'Are you sure?');
+  setText(el('confirmWhat'), what || '');
+  setText(el('confirmGo'), action || 'Yes');
+  setText(el('confirmWarn'), danger || '');
+  setHidden(el('confirmWarn'), !danger);
+  return new Promise((resolve) => {
+    const done = () => {
+      dlg.removeEventListener('close', done);
+      resolve(dlg.returnValue === 'ok');
+    };
+    dlg.addEventListener('close', done);
+    dlg.returnValue = '';
+    dlg.showModal();
+    el('confirmNo').focus();
+  });
+}
+
 /* ---------- errors ---------- */
 
 function fail(msg) {
@@ -1824,7 +1859,13 @@ function renderImages() {
     const del = text('button', 'Delete');
     del.type = 'button';
     del.addEventListener('click', async () => {
-      if (!window.confirm(`Delete ${f.name}? This cannot be undone.`)) return;
+      const yes = await ask({
+        title: 'Delete this image',
+        what: `${f.name} \u2014 ${bytes(f.size)}`,
+        action: 'Delete it',
+        danger: 'It is removed from the store. This cannot be undone.',
+      });
+      if (!yes) return;
       del.disabled = true;
       try {
         await api(`/api/images/${encodeURIComponent(f.name)}`, { method: 'DELETE' });
@@ -1983,21 +2024,25 @@ function wireActions() {
     if (!d || !image) return;
     const dummy = el('burnDummy').checked;
     const unpack = isArchiveName(image);
-    let what;
+    let title = 'Burn this disc';
+    let danger = 'Whatever is on the disc now is gone. This cannot be undone.';
+    let what = `${image}\n\nto the disc in ${d.id}`;
     if (unpack) {
-      what = `Write the files inside ${image} to the disc in ${d.id}?\n\n` +
-        'The disc will hold the files, not the archive. This cannot be undone.';
+      title = 'Write these files to a disc';
+      what = `The files inside ${image}\n\nto the disc in ${d.id}`;
+      danger = 'The disc will hold the files, not the archive. This cannot be undone.';
     } else if (dummy) {
-      what = `Rehearse writing ${image} in ${d.id}? The laser stays off and the disc is untouched.`;
-    } else {
-      what = `Write ${image} to the disc in ${d.id}?\n\nThis cannot be undone: whatever is on the disc now is gone.`;
+      title = 'Rehearse this burn';
+      danger = '';
+      what = `${image}\n\nThe laser stays off and the disc is untouched.`;
     }
     // If it will not boot, say so here rather than after the disc is spent.
     const info = state.burnInfo;
     if (!dummy && info && info.boot && !info.boot.bootable) {
-      what += `\n\n${upperFirst(info.boot.why || 'This image will not boot.')}`;
+      danger += `\n${upperFirst(info.boot.why || 'This image will not boot.')}`;
     }
-    if (!window.confirm(what)) return;
+    const yes = await ask({ title, what, action: dummy ? 'Rehearse' : 'Burn it', danger });
+    if (!yes) return;
     try {
       await post('/api/burn', {
         drive: d.id,
@@ -2018,12 +2063,16 @@ function wireActions() {
     const names = Array.from(appendPicked);
     const folder = el('appendFolder').value.trim();
     const closing = el('appendClose').checked;
-    let what = `Add ${names.length} file${names.length > 1 ? 's' : ''} to the disc in ${d.id}?\n\n` +
-      'Nothing already on it is erased.';
-    if (closing) {
-      what += '\n\nThe disc will then be closed, and nothing can ever be added to it again. That cannot be undone.';
-    }
-    if (!window.confirm(what)) return;
+    const yes = await ask({
+      title: 'Add to this disc',
+      what: `${names.length} file${names.length > 1 ? 's' : ''} to the disc in ${d.id}.\n` +
+        'Nothing already on it is erased.',
+      action: 'Add them',
+      danger: closing
+        ? 'The disc will then be closed, and nothing can ever be added to it again. That cannot be undone.'
+        : '',
+    });
+    if (!yes) return;
     try {
       await post('/api/append', {
         drive: d.id,
@@ -2040,7 +2089,13 @@ function wireActions() {
   el('btnErase').addEventListener('click', async () => {
     const d = state.detail;
     if (!d) return;
-    if (!window.confirm(`Erase the disc in ${d.id}? Everything on it is lost.`)) return;
+    const yes = await ask({
+      title: 'Erase this disc',
+      what: `The disc in ${d.id}.`,
+      action: 'Erase it',
+      danger: 'Everything on it is lost. This cannot be undone.',
+    });
+    if (!yes) return;
     try { await post('/api/erase', { drive: d.id }); fail(''); }
     catch (e) { fail(String(e.message || e)); }
   });
