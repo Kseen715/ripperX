@@ -1,0 +1,471 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ripperX</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="stylesheet" href="base.css">
+<style>
+  /* Only what belongs to this page; the chrome is in base.css. */
+
+  /* A drive is a card. They sit on one row until there is no room, then
+     wrap - a machine with one drive gets one wide card rather than a
+     column of empty space beside it. */
+  .cards { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+  .card {
+    border: 1px solid var(--line); background: var(--panel); padding: 12px;
+    display: flex; flex-direction: column; gap: 8px; text-align: left;
+  }
+  /* The card's heading is what selects it; the buttons along the bottom act
+     on the drive without selecting it, so they are not nested inside it. */
+  .card > .pick {
+    border: 0; background: none; padding: 0; margin: 0; font: inherit;
+    text-align: left; cursor: pointer; display: flex; gap: 10px;
+    align-items: flex-start; justify-content: space-between; width: 100%;
+  }
+  .card > .pick::after { display: none; }
+  .card > .pick:hover h2 { color: var(--accent); }
+  .card .tray { display: flex; gap: 6px; flex-wrap: wrap; }
+  .card .tray button { font-size: 12px; padding: 4px 9px; }
+  .card .tray button::after { display: none; }
+  /* The selected drive is inverted at its edge rather than tinted, so the
+     distinction survives a grayscale screen and a colour-blind reader. */
+  .card.on { border-left: 5px solid var(--accent); }
+  .card h2 { font-size: 13px; margin: 0; letter-spacing: .04em; }
+  .card .dev { font-size: 11px; color: var(--muted); }
+
+  /* A chip is a one-word state: what is in the drive, what it is doing. */
+  .chip {
+    font-size: 10px; letter-spacing: .12em; text-transform: uppercase;
+    border: 1px solid var(--hair); padding: 2px 6px; color: var(--ink-2);
+    white-space: nowrap;
+  }
+  .chip.busy { border-color: var(--accent); color: var(--accent); }
+  .chip.none { color: var(--muted); }
+
+  .tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+
+  /* Tables carry the file listing, the tracks and the images. Rows are
+     dense and the numeric columns are tabular, so sizes line up on their
+     decimal points down the column. */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th {
+    text-align: left; font-size: 10px; letter-spacing: .14em; font-weight: 700;
+    text-transform: uppercase; color: var(--muted); padding: 0 8px 6px 0;
+    border-bottom: 1px solid var(--hair); white-space: nowrap;
+  }
+  td { padding: 6px 8px 6px 0; border-bottom: 1px solid var(--hair); vertical-align: middle; }
+  tr:last-child td { border-bottom: 0; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  td.act { text-align: right; white-space: nowrap; }
+  td.act button, td.act a.btn { font-size: 12px; padding: 4px 9px; }
+  /* The one place a button has no corner mark: at this size it is noise. */
+  td.act button::after, td.act a.btn::after { display: none; }
+  .wrapname { word-break: break-all; }
+  .scroll { max-height: 420px; overflow: auto; }
+
+  /* The name cell of a directory doubles as the way into it. */
+  button.link {
+    border: 0; background: none; padding: 0; font: inherit; color: var(--ink);
+    text-decoration: underline; text-underline-offset: 2px; cursor: pointer;
+    text-align: left;
+  }
+  button.link::after { display: none; }
+  button.link:hover { background: none; color: var(--accent); }
+
+  .bread { font-size: 12px; margin: 0 0 10px; word-break: break-all; }
+  .bread button.link { font-size: 12px; }
+  .bread span { color: var(--muted); }
+
+  .bar { height: 10px; background: var(--sunken); border: 1px solid var(--line); }
+  .bar > i {
+    display: block; height: 100%; width: 0; transition: width .25s;
+    background: repeating-linear-gradient(45deg,
+      var(--ink) 0 5px, var(--ink-2) 5px 10px);
+  }
+  .bar.done > i { background: var(--ink); }
+  .bar.bad > i { background: var(--accent); }
+
+  /* The disc from the middle outwards, one column per bucket. Grayscale
+     for errors the correction handled, the accent only for sectors that are
+     gone - which is the one thing here that cannot be undone. */
+  .strip { display: flex; height: 34px; border: 1px solid var(--line); background: var(--sunken); }
+  .strip > i { flex: 1 1 0; height: 100%; }
+
+  /* The severities. These are deliberately not scoped to .strip: the key
+     below it uses the same classes for its swatches, so one rule paints
+     both and the two cannot drift apart. */
+  .s0 { background: transparent; }
+  .s1 { background: var(--hair); }
+  .s2 { background: var(--ink-2); }
+  .s3 { background: var(--ink); }
+  .sx { background: var(--accent); }
+  /* A stretch the drive fought its way through. Hatched in the accent
+     rather than solid: the data came back, but it took retries to get it,
+     and on a DVD this is the only mark the map ever gets. */
+  .ss {
+    background: repeating-linear-gradient(45deg,
+      var(--accent) 0 2px, var(--panel) 2px 4px);
+  }
+  /* Not yet read. It must not look like a clean bucket: a strip that shows
+     a disc as spotless before it has been looked at is a lie told by
+     omission. */
+  .sp {
+    background: repeating-linear-gradient(45deg,
+      var(--sunken) 0 3px, var(--grid) 3px 6px);
+  }
+
+  .stripkey { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11px; color: var(--muted); margin-top: 6px; }
+  .stripkey span { display: flex; align-items: center; gap: 5px; }
+  .stripkey i { width: 10px; height: 10px; display: inline-block; border: 1px solid var(--hair); flex: none; }
+
+  /* A grade is a word, and the one word people will read. It gets weight
+     rather than colour, except for the two that mean act now. */
+  .grade {
+    font-size: 11px; letter-spacing: .16em; text-transform: uppercase;
+    font-weight: 700; border: 1px solid var(--line); padding: 3px 8px;
+  }
+  .grade.bad { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  .grade.warn { background: repeating-linear-gradient(45deg, transparent 0 6px, var(--hair) 6px 7px); }
+  .trend.worse { color: var(--accent); }
+
+  dialog {
+    border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+    padding: 0; max-width: 520px; width: calc(100% - 32px);
+  }
+  dialog::backdrop { background: rgba(0,0,0,.55); }
+  dialog .body { padding: 16px; }
+  dialog h2 { font-size: 13px; letter-spacing: .18em; text-transform: uppercase; margin: 0 0 4px; }
+  .fmt { display: flex; flex-direction: column; gap: 2px; margin: 12px 0; }
+  .fmt label {
+    display: flex; gap: 10px; align-items: flex-start; padding: 8px;
+    border: 1px solid transparent; cursor: pointer;
+    text-transform: none; letter-spacing: 0; font-size: 13px; color: var(--ink);
+  }
+  .fmt label:hover { background: var(--sunken); }
+  .fmt label.on { border-color: var(--line); background: var(--sunken); }
+  .fmt .name { font-weight: 700; }
+  .fmt .why { color: var(--muted); font-size: 12px; display: block; margin-top: 2px; }
+
+  .job { border-top: 1px solid var(--hair); padding: 10px 0; }
+  .job:first-of-type { border-top: 0; padding-top: 0; }
+  .job .head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+  .job .head b { font-size: 13px; font-weight: 700; }
+  .job .meta { font-size: 11px; color: var(--muted); margin: 6px 0 0; word-break: break-all; }
+
+  /* The upload target. A dashed edge is the one place this page departs
+     from solid rules: it is the conventional sign that something may be
+     dropped here, and inventing a different one would only puzzle people. */
+  .drop {
+    border: 1px dashed var(--hair); padding: 14px; text-align: center;
+    font-size: 12px; color: var(--muted);
+  }
+  .drop.over { border-color: var(--accent); color: var(--ink); background: var(--sunken); }
+
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+  @media (max-width: 900px) { .two { grid-template-columns: 1fr; } }
+
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 700px) { .cols { grid-template-columns: 1fr; } }
+  .cols ul { margin: 0; padding-left: 18px; font-size: 12px; }
+  .cols li { margin-bottom: 4px; }
+  .cols .label { margin-bottom: 8px; }
+  /* What a drive cannot do is stated, not hidden - but it is not shouted
+     either, so the two columns read as one fact each. */
+  .cant li { color: var(--muted); }
+
+  fieldset { border: 1px solid var(--hair); padding: 10px 12px; margin: 0 0 12px; }
+  legend {
+    font-size: 10px; letter-spacing: .16em; text-transform: uppercase;
+    color: var(--muted); font-weight: 700; padding: 0 6px;
+  }
+  .fields { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: flex-end; }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field input, .field select { font: inherit; font-size: 13px; padding: 6px 8px;
+    background: var(--panel); color: var(--ink); border: 1px solid var(--line); }
+  .field input[type=text] { min-width: 210px; }
+  .check { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-2);
+    text-transform: none; letter-spacing: 0; }
+
+  audio { width: 100%; max-width: 360px; height: 34px; }
+
+  @media (max-width: 720px) {
+    /* Fingers, not pointers. */
+    .tabs button, .fields button, .row > button { min-height: 44px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="cut">
+    <h1>ripperX</h1>
+    <p id="status" class="mono" style="color:var(--ink-2);font-size:12px;margin:0;word-break:break-word">connecting&hellip;</p>
+    <!-- Whether this page is receiving the shared state; every device that
+         has it open sees the same drives and the same jobs. -->
+    <p id="conn" class="mono muted" style="font-size:11px;margin:4px 0 0">connecting&hellip;</p>
+    <button id="btnLogout" hidden style="margin-top:10px">Sign out</button>
+  </header>
+
+  <div id="warning" class="warn" hidden></div>
+  <div id="error" class="err" hidden></div>
+
+  <div class="panel cut">
+    <p class="label">Drives</p>
+    <div class="cards" id="drives"></div>
+    <p class="muted" id="noDrives" hidden style="font-size:12px;margin:0">
+      No optical drive was found on this machine.
+    </p>
+  </div>
+
+  <div class="panel cut" id="work" hidden>
+    <p class="label" id="workTitle">Drive</p>
+    <div class="tabs">
+      <button data-tab="disc" class="active">Disc</button>
+      <button data-tab="files">Files</button>
+      <button data-tab="audio">Audio</button>
+      <button data-tab="drive">What it can do</button>
+    </div>
+
+    <section id="tabDisc">
+      <div id="discNone" class="muted" style="font-size:13px" hidden></div>
+      <div id="discBody" hidden>
+        <dl id="discFacts" style="margin-bottom:14px"></dl>
+
+        <fieldset>
+          <legend>Rip this disc</legend>
+          <div class="fields">
+            <span class="field">
+              <label for="ripKind">What to make</label>
+              <select id="ripKind"></select>
+            </span>
+            <span class="field">
+              <label for="ripName">Call it</label>
+              <input id="ripName" type="text" placeholder="taken from the disc's label">
+            </span>
+            <span class="field">
+              <label for="ripSpeed">Read at</label>
+              <select id="ripSpeed">
+                <option value="0">the drive's own speed</option>
+                <option value="4234">24x</option>
+                <option value="2822">16x</option>
+                <option value="1410">8x</option>
+                <option value="705">4x</option>
+                <option value="352">2x</option>
+                <option value="176">1x - for a scratched disc</option>
+              </select>
+            </span>
+            <span class="field" id="ripLengthField">
+              <label for="ripLength">Cover</label>
+              <select id="ripLength">
+                <option value="track">the whole data track</option>
+                <option value="volume">only what the filesystem claims</option>
+              </select>
+            </span>
+            <button id="btnRip" class="primary">Start</button>
+          </div>
+          <p class="muted" id="ripHint" style="font-size:12px;margin:10px 0 0"></p>
+        </fieldset>
+
+        <fieldset>
+          <legend>Check this disc</legend>
+          <div class="fields">
+            <span class="field">
+              <label for="scanSpeed">Read at</label>
+              <select id="scanSpeed">
+                <option value="0">the drive's own speed</option>
+                <option value="2822">16x</option>
+                <option value="1410">8x</option>
+                <option value="705">4x - finds the most</option>
+              </select>
+            </span>
+            <button id="btnScan">Check the surface</button>
+            <span class="muted" id="scanNote" style="font-size:12px;flex:1 1 200px"></span>
+          </div>
+          <div id="scanResult" hidden style="margin-top:14px"></div>
+        </fieldset>
+
+        <fieldset id="burnBox">
+          <legend>Burn a disc in this drive</legend>
+          <div id="burnBlocked" class="muted" style="font-size:12px" hidden></div>
+          <div id="burnFields" hidden>
+            <div class="fields">
+              <span class="field">
+                <label for="burnImage">Image</label>
+                <select id="burnImage"></select>
+              </span>
+              <span class="field">
+                <label for="burnSpeed">Write at</label>
+                <select id="burnSpeed">
+                  <option value="0">the drive's own speed</option>
+                  <option value="24">24x</option>
+                  <option value="16">16x</option>
+                  <option value="8">8x</option>
+                  <option value="4">4x</option>
+                  <option value="2">2x</option>
+                </select>
+              </span>
+              <label class="check"><input type="checkbox" id="burnVerify" checked>
+                read the disc back and check it</label>
+              <label class="check"><input type="checkbox" id="burnDummy">
+                rehearse with the laser off</label>
+              <button id="btnBurn" class="primary">Burn</button>
+              <button id="btnErase" hidden>Erase this disc</button>
+            </div>
+            <p class="muted" id="burnHint" style="font-size:12px;margin:10px 0 0"></p>
+          </div>
+        </fieldset>
+
+        <fieldset id="appendBox" hidden>
+          <legend>Add to this disc</legend>
+          <div id="appendBlocked" class="muted" style="font-size:12px" hidden></div>
+          <div id="appendFields" hidden>
+            <p class="muted" id="appendRoom" style="font-size:12px;margin:0 0 10px"></p>
+            <div class="scroll" style="max-height:170px;margin-bottom:10px">
+              <table>
+                <thead><tr>
+                  <th style="width:1%"></th><th>File</th><th class="num">Size</th>
+                </tr></thead>
+                <tbody id="appendRows"></tbody>
+              </table>
+            </div>
+            <div class="fields">
+              <span class="field">
+                <label for="appendFolder">Put them in</label>
+                <input id="appendFolder" type="text" placeholder="the disc's root">
+              </span>
+              <label class="check"><input type="checkbox" id="appendVerify" checked>
+                read them back off the disc and check them</label>
+              <label class="check"><input type="checkbox" id="appendClose">
+                close the disc afterwards</label>
+              <button id="btnAppend" class="primary" disabled>Add to the disc</button>
+            </div>
+            <p class="muted" id="appendHint" style="font-size:12px;margin:10px 0 0">
+              Nothing already on the disc is erased, and the files that are there stay
+              visible: the existing filesystem is read and added to. Closing the disc
+              is the one part of this that cannot be undone.
+            </p>
+          </div>
+        </fieldset>
+      </div>
+    </section>
+
+    <section id="tabFiles" hidden>
+      <p id="filesNone" class="muted" style="font-size:13px" hidden></p>
+      <div id="filesBody" hidden>
+        <p class="bread" id="bread"></p>
+        <div class="row" style="margin-bottom:10px">
+          <button id="btnUp">Up</button>
+          <button id="btnRipSel" disabled>Save selected to images</button>
+          <button id="btnArchive">Download this folder&hellip;</button>
+          <span class="muted" id="selNote" style="font-size:11px"></span>
+        </div>
+        <div class="scroll">
+          <table>
+            <thead><tr>
+              <th style="width:1%"><input type="checkbox" id="selAll" aria-label="select everything here"></th>
+              <th>Name</th><th class="num">Size</th><th class="num">Changed</th><th></th>
+            </tr></thead>
+            <tbody id="fileRows"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section id="tabAudio" hidden>
+      <p id="audioNone" class="muted" style="font-size:13px" hidden></p>
+      <div id="audioBody" hidden>
+        <div class="row" style="margin-bottom:10px">
+          <button id="btnRipAudio" class="primary">Rip every track to .wav</button>
+          <a id="btnM3U" class="btn">Playlist for VLC</a>
+        </div>
+        <table>
+          <thead><tr><th>Track</th><th class="num">Length</th><th>Play</th><th></th></tr></thead>
+          <tbody id="trackRows"></tbody>
+        </table>
+        <p class="muted" style="font-size:11px;margin-top:10px">
+          Tracks are served as WAV: the sectors of an audio CD are already PCM, so
+          nothing is decoded or re-encoded on the way to the browser.
+        </p>
+      </div>
+    </section>
+
+    <section id="tabDrive" hidden>
+      <dl id="driveFacts" style="margin-bottom:14px"></dl>
+      <div class="cols">
+        <div>
+          <p class="label">It can</p>
+          <ul id="can"></ul>
+        </div>
+        <div class="cant">
+          <p class="label">It cannot</p>
+          <ul id="cannot"></ul>
+        </div>
+      </div>
+      <p class="muted" id="capNotes" style="font-size:11px;margin-top:12px"></p>
+    </section>
+  </div>
+
+  <div class="two">
+    <div class="panel cut" style="margin:0">
+      <p class="label">Images</p>
+      <p class="muted" id="storeLine" style="font-size:11px;margin:0 0 10px;word-break:break-all"></p>
+      <!-- No form element: the upload goes through XMLHttpRequest so that it
+           can report how far it has got, and a form here would only add a
+           way to submit it without that. -->
+      <label class="drop" id="drop" for="file">
+        Drop an image here, or choose one to upload.
+        <input type="file" id="file" name="file" hidden>
+      </label>
+      <div class="bar" id="upBar" hidden style="margin-top:8px"><i></i></div>
+      <p class="muted mono" id="upNote" hidden style="font-size:11px;margin:6px 0 0"></p>
+      <div class="scroll" style="margin-top:12px">
+        <table>
+          <thead><tr><th>Name</th><th class="num">Size</th><th></th></tr></thead>
+          <tbody id="imageRows"></tbody>
+        </table>
+      </div>
+      <p class="muted" id="noImages" hidden style="font-size:12px;margin:8px 0 0">
+        Nothing here yet. Rip a disc, or upload an image to burn.
+      </p>
+    </div>
+
+    <div class="panel cut" style="margin:0">
+      <p class="label">Jobs</p>
+      <div id="jobs"></div>
+      <p class="muted" id="noJobs" style="font-size:12px;margin:0">
+        Nothing running. A rip or a burn appears here and stays until this
+        server restarts.
+      </p>
+    </div>
+  </div>
+
+  <div class="panel cut" id="discsPanel" hidden>
+    <p class="label">Discs checked</p>
+    <p class="muted" id="discsNote" style="font-size:11px;margin:0 0 10px"></p>
+    <div id="discs"></div>
+  </div>
+
+  <p class="foot">
+    Images are kept in <code id="storeFoot">&hellip;</code>.
+    The HTTP interface behind this page is documented at <a href="/docs">/docs</a>.
+    ripperX talks to the drives in SCSI MMC directly; writing a disc is handed
+    to <code id="burnerFoot">a burner program</code>, and what it wrote is read
+    back and checked here.
+  </p>
+</div>
+<dialog id="archiveDialog">
+  <form method="dialog" class="body">
+    <h2 id="archiveTitle">Download archive</h2>
+    <p class="muted" id="archiveWhat" style="font-size:12px;margin:0"></p>
+    <div class="fmt" id="archiveFormats"></div>
+    <div class="row" style="justify-content:flex-end">
+      <button value="cancel">Cancel</button>
+      <button value="ok" class="primary" id="archiveGo">Download</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="app.js"></script>
+</body>
+</html>

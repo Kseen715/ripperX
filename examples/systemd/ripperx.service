@@ -1,0 +1,50 @@
+[Unit]
+Description=ripperX - optical drives over HTTP
+Documentation=https://github.com/Kseen715/ripperX
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/ripperx
+Restart=on-failure
+RestartSec=5
+
+# ripperX needs the drive nodes, and burning needs to reprogram the drive,
+# which the kernel only allows to a process with CAP_SYS_RAWIO. Running as a
+# dedicated user in the cdrom group is enough for reading; a burn also needs
+# that capability, which is why it is granted rather than running as root.
+User=ripperx
+Group=ripperx
+SupplementaryGroups=cdrom
+AmbientCapabilities=CAP_SYS_RAWIO
+CapabilityBoundingSet=CAP_SYS_RAWIO
+
+# Where images are kept. systemd creates it and hands it over.
+StateDirectory=ripperx
+Environment=HOME=/var/lib/ripperx
+
+# Everything below is the machine ripperX is not allowed to touch. It reads
+# discs and writes images; it has no business anywhere else.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/ripperx
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# The drives themselves, and nothing else in /dev.
+DeviceAllow=block-sr rw
+DeviceAllow=char-sg rw
+DevicePolicy=closed
+
+[Install]
+WantedBy=multi-user.target

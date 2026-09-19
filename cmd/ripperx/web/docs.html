@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ripperX - HTTP interface</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="stylesheet" href="base.css">
+<style>
+  /* Only what belongs to this page; the chrome is in base.css.
+
+     Everything below renders /api/openapi.json, which the server generates from
+     its own route table. Nothing here knows the endpoints, so nothing here goes
+     stale when they change. */
+  #sub {
+    color: var(--ink-2); font-size: 12px; margin: 0; word-break: break-word;
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+
+  .toc { display: flex; flex-wrap: wrap; gap: 6px 10px; }
+  .toc a {
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12px; text-decoration: none; border-bottom: 1px solid var(--hair);
+  }
+  .toc a:hover { border-bottom-color: var(--line); }
+
+  /* Method chip: grayscale, inverted, so the verb reads at a glance without
+     introducing a second colour. */
+  .tag {
+    font-size: 10px; font-weight: 700; letter-spacing: .12em; padding: 3px 7px;
+    background: var(--ink); color: var(--panel); text-transform: uppercase;
+  }
+  .tag.open { background: var(--panel); color: var(--ink-2); border: 1px solid var(--hair); }
+  .path { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+          font-size: 13px; font-weight: 700; word-break: break-all; }
+  .ep { scroll-margin-top: 12px; }
+  .ep h2 { font-size: 13px; margin: 0; font-weight: 400; }
+  .desc { margin: 10px 0 0; color: var(--ink-2); font-size: 13px; }
+
+  table { border-collapse: collapse; width: 100%; font-size: 12px; margin-top: 8px; }
+  th {
+    text-align: left; font-size: 10px; letter-spacing: .16em; text-transform: uppercase;
+    color: var(--muted); font-weight: 700; padding: 0 10px 6px 0;
+    border-bottom: 1px solid var(--hair);
+  }
+  td { padding: 6px 10px 6px 0; vertical-align: top; border-bottom: 1px solid var(--hair); }
+  tr:last-child td { border-bottom: 0; }
+  td.name {
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    white-space: nowrap;
+  }
+  td.type { color: var(--muted); white-space: nowrap; }
+  /* Nesting is shown by indentation on the name, which keeps one flat table
+     readable instead of nesting tables inside cells. */
+  .lvl1 { padding-left: 14px; } .lvl2 { padding-left: 28px; } .lvl3 { padding-left: 42px; }
+  .req { color: var(--ink); font-weight: 700; }
+  .opt { color: var(--muted); }
+  .code-num { font-weight: 700; }
+
+  pre {
+    margin: 8px 0 0; padding: 10px 12px; background: var(--sunken);
+    border: 1px solid var(--hair); overflow-x: auto; font-size: 11px;
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    color: var(--ink-2);
+  }
+  .sec { margin-top: 14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="cut">
+    <div class="regmark"></div>
+    <h1>Epson Stylus CX4300 - HTTP interface</h1>
+    <p id="sub">loading&hellip;</p>
+    <div class="row" style="margin-top:10px">
+      <a class="btn" href="/">Back to the scanner</a>
+      <a class="btn" href="/api/openapi.json">OpenAPI document</a>
+    </div>
+  </header>
+
+  <div id="error" class="err" hidden></div>
+
+  <div class="panel cut">
+    <p class="label">Endpoints</p>
+    <div class="toc" id="toc"></div>
+    <p class="muted" id="authNote" style="margin:12px 0 0;font-size:12px"></p>
+  </div>
+
+  <div id="list"></div>
+
+  <p class="foot">
+    This page is drawn from <code>/api/openapi.json</code>, which the server
+    generates from the table it registers its own endpoints from - so it
+    describes what this build does rather than what someone wrote down.
+  </p>
+</div>
+<script>
+const el = (id) => document.getElementById(id);
+let schemas = {};
+
+// ---------- schema helpers ----------
+
+// deref follows a $ref, and unwraps the allOf a described $ref is wrapped in.
+function deref(s) {
+  if (!s) return {};
+  if (s.$ref) return schemas[s.$ref.split('/').pop()] || {};
+  if (s.allOf && s.allOf.length === 1) {
+    const inner = deref(s.allOf[0]);
+    return Object.assign({}, inner, { description: s.description || inner.description });
+  }
+  return s;
+}
+
+// typeName is the one-word summary shown beside a field. A nullable field is
+// written "x or null", which is what the JSON actually contains.
+function typeName(s) {
+  if (!s) return 'any';
+  if (s.$ref) return s.$ref.split('/').pop();
+  if (s.allOf && s.allOf.length === 1) return typeName(s.allOf[0]);
+  if (s.oneOf) return s.oneOf.map(typeName).filter((t) => t !== 'null').concat('null').join(' or ');
+  if (s.type === 'array') return 'array of ' + typeName(s.items);
+  if (s.type === 'string' && s.format === 'binary') return 'bytes';
+  if (!s.type) return 'any';
+  return s.nullable ? s.type + ' or null' : s.type;
+}
+
+// objectOf finds the object a schema ultimately describes, through a $ref, a
+// nullable wrapper or an array, so its fields can be listed.
+function objectOf(s) {
+  const d = deref(s);
+  if (d.type === 'object' && d.properties) return d;
+  if (d.oneOf) {
+    for (const alt of d.oneOf) {
+      const o = objectOf(alt);
+      if (o) return o;
+    }
+  }
+  if (d.type === 'array') return objectOf(d.items);
+  return null;
+}
+
+// ordered lists an object's fields as they are declared in Go rather than as
+// JSON hands them over, which is alphabetical and scatters fields written to be
+// read in sequence.
+function ordered(obj) {
+  const entries = Object.entries(obj.properties || {});
+  const order = obj['x-fieldOrder'];
+  if (!order) return entries;
+  const at = new Map(order.map((name, i) => [name, i]));
+  return entries.sort((a, b) => (at.get(a[0]) ?? 1e9) - (at.get(b[0]) ?? 1e9));
+}
+
+// fieldRows flattens an object schema into table rows, descending into nested
+// objects and stopping at a depth no body here reaches, so a type that refers
+// to itself cannot spin.
+function fieldRows(schema, depth, seen) {
+  const obj = objectOf(schema);
+  if (!obj || depth > 3) return [];
+  const required = obj.required || [];
+  const rows = [];
+  for (const [name, raw] of ordered(obj)) {
+    const s = deref(raw);
+    rows.push({
+      name, depth,
+      type: typeName(raw),
+      required: required.includes(name),
+      desc: raw.description || s.description || '',
+    });
+    const nested = objectOf(raw);
+    const key = raw.$ref || (raw.allOf && raw.allOf[0] && raw.allOf[0].$ref);
+    if (nested && !(key && seen.has(key))) {
+      const next = new Set(seen);
+      if (key) next.add(key);
+      rows.push(...fieldRows(raw, depth + 1, next));
+    }
+  }
+  return rows;
+}
+
+function fieldTable(schema) {
+  const rows = fieldRows(schema, 0, new Set());
+  if (!rows.length) return null;
+  const table = document.createElement('table');
+  table.innerHTML = '<thead><tr><th>Field</th><th>Type</th><th>Required</th><th></th></tr></thead>';
+  const body = document.createElement('tbody');
+  for (const r of rows) {
+    const tr = document.createElement('tr');
+    const name = document.createElement('td');
+    name.className = 'name' + (r.depth ? ' lvl' + r.depth : '');
+    name.textContent = r.name;
+    const type = document.createElement('td');
+    type.className = 'type';
+    type.textContent = r.type;
+    const req = document.createElement('td');
+    req.className = r.required ? 'req' : 'opt';
+    req.textContent = r.required ? 'yes' : 'no';
+    const desc = document.createElement('td');
+    desc.textContent = r.desc;
+    tr.append(name, type, req, desc);
+    body.appendChild(tr);
+  }
+  table.appendChild(body);
+  return table;
+}
+
+// sample builds the smallest body worth sending, for the curl line: every
+// required field at its zero value, which is what the handlers treat as "use
+// the default".
+function sample(schema, depth) {
+  const obj = objectOf(schema);
+  if (!obj || depth > 2) return null;
+  const out = {};
+  for (const [name, raw] of ordered(obj)) {
+    if (!(obj.required || []).includes(name)) continue;
+    const s = deref(raw);
+    const nested = objectOf(raw);
+    if (nested) out[name] = sample(raw, depth + 1);
+    else if (s.type === 'integer' || s.type === 'number') out[name] = 0;
+    else if (s.type === 'boolean') out[name] = false;
+    else if (s.type === 'array') out[name] = [];
+    else out[name] = '';
+  }
+  return out;
+}
+
+// ---------- page ----------
+
+function section(parent, label) {
+  const p = document.createElement('p');
+  p.className = 'label';
+  p.style.margin = '0';
+  p.textContent = label;
+  const box = document.createElement('div');
+  box.className = 'sec';
+  box.appendChild(p);
+  parent.appendChild(box);
+  return box;
+}
+
+function curlFor(method, path, op, needsAuth) {
+  let cmd = 'curl';
+  if (method !== 'GET') cmd += ' -X ' + method;
+  cmd += ' ' + location.origin + path;
+  if (needsAuth) cmd += ' \\\n  -H "Authorization: Bearer $TOKEN"';
+  const body = op.requestBody && op.requestBody.content['application/json'];
+  if (body) {
+    // The table's own example where there is one, since a rectangle at its zero
+    // values is not a thing worth copying.
+    const example = body.example !== undefined ? body.example : sample(body.schema, 0);
+    if (example) {
+      cmd += ' \\\n  -H "Content-Type: application/json" \\\n  -d ' +
+             JSON.stringify(JSON.stringify(example));
+    }
+  }
+  return cmd;
+}
+
+function render(spec) {
+  schemas = (spec.components && spec.components.schemas) || {};
+  const secured = Array.isArray(spec.security) && spec.security.length > 0;
+
+  el('sub').textContent = (spec.info.title || 'ripperX') + ' ' + (spec.info.version || '') +
+    ' - ' + (secured ? 'a login is required except where noted' : 'no authentication on this server');
+  el('authNote').textContent = spec.info.description || '';
+
+  // Flatten paths into operations, in the order the server declared them.
+  const ops = [];
+  for (const [path, methods] of Object.entries(spec.paths)) {
+    for (const [method, op] of Object.entries(methods)) {
+      ops.push({ path, method: method.toUpperCase(), op, order: op['x-order'] ?? 0 });
+    }
+  }
+  ops.sort((a, b) => a.order - b.order);
+
+  const toc = el('toc');
+  const list = el('list');
+  for (const { path, method, op } of ops) {
+    const id = op.operationId;
+    const open = secured && Array.isArray(op.security) && op.security.length === 0;
+
+    const link = document.createElement('a');
+    link.href = '#' + id;
+    link.textContent = method + ' ' + path;
+    toc.appendChild(link);
+
+    const panel = document.createElement('div');
+    panel.className = 'panel cut ep';
+    panel.id = id;
+
+    const head = document.createElement('div');
+    head.className = 'row';
+    const tag = document.createElement('span');
+    tag.className = 'tag';
+    tag.textContent = method;
+    const p = document.createElement('span');
+    p.className = 'path';
+    p.textContent = path;
+    head.append(tag, p);
+    if (open) {
+      const badge = document.createElement('span');
+      badge.className = 'tag open';
+      badge.textContent = 'no login';
+      head.appendChild(badge);
+    }
+    panel.appendChild(head);
+
+    const h = document.createElement('h2');
+    h.style.marginTop = '10px';
+    h.textContent = op.summary || '';
+    panel.appendChild(h);
+
+    if (op.description) {
+      const d = document.createElement('p');
+      d.className = 'desc';
+      d.textContent = op.description;
+      panel.appendChild(d);
+    }
+
+    if (op.parameters && op.parameters.length) {
+      const box = section(panel, 'Path');
+      const table = document.createElement('table');
+      table.innerHTML = '<thead><tr><th>Name</th><th>Type</th><th></th></tr></thead>';
+      const body = document.createElement('tbody');
+      for (const prm of op.parameters) {
+        const tr = document.createElement('tr');
+        const n = document.createElement('td'); n.className = 'name'; n.textContent = prm.name;
+        const t = document.createElement('td'); t.className = 'type'; t.textContent = typeName(prm.schema);
+        const d = document.createElement('td'); d.textContent = prm.description || '';
+        tr.append(n, t, d);
+        body.appendChild(tr);
+      }
+      table.appendChild(body);
+      box.appendChild(table);
+    }
+
+    const reqBody = op.requestBody && op.requestBody.content['application/json'];
+    if (reqBody) {
+      const box = section(panel, 'Request body');
+      const table = fieldTable(reqBody.schema);
+      if (table) box.appendChild(table);
+      const note = document.createElement('p');
+      note.className = 'muted';
+      note.style.cssText = 'margin:8px 0 0;font-size:12px';
+      note.textContent = 'A field left out is taken at its zero value.';
+      box.appendChild(note);
+    }
+
+    const box = section(panel, 'Responses');
+    for (const [code, resp] of Object.entries(op.responses).sort()) {
+      const line = document.createElement('p');
+      line.style.cssText = 'margin:6px 0 0;font-size:12px';
+      const num = document.createElement('span');
+      num.className = 'code-num mono';
+      num.textContent = code;
+      line.append(num, document.createTextNode(' ' + (resp.description || '')));
+      const content = resp.content && Object.keys(resp.content)[0];
+      if (content && content !== 'application/json') {
+        const t = document.createElement('span');
+        t.className = 'muted';
+        t.textContent = ' (' + content + ')';
+        line.appendChild(t);
+      }
+      box.appendChild(line);
+      if (content) {
+        const table = fieldTable(resp.content[content].schema);
+        if (table) box.appendChild(table);
+      }
+    }
+
+    const pre = document.createElement('pre');
+    pre.textContent = curlFor(method, path.replace(/\{(\w+)\}/g, '$1'), op, secured && !open);
+    section(panel, 'Example').appendChild(pre);
+
+    list.appendChild(panel);
+  }
+}
+
+(async function load() {
+  try {
+    const r = await fetch('/api/openapi.json');
+    if (r.status === 401) { window.location.replace('/login'); return; }
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    render(await r.json());
+  } catch (e) {
+    el('sub').textContent = 'unavailable';
+    const box = el('error');
+    box.hidden = false;
+    box.textContent = 'Could not load /api/openapi.json: ' + e;
+  }
+})();
+</script>
+</body>
+</html>

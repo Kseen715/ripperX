@@ -1,0 +1,15 @@
+# Build output.
+/ripperx
+/dist/
+
+# Images and rips, in case anyone points -out at the working directory.
+*.iso
+*.img
+*.cue
+*.tar
+*.wav
+*.Identifier
+
+# A settings file with a password in it has no business in the repository.
+ripperx.conf
+!examples/ripperx.conf

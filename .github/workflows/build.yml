@@ -1,0 +1,142 @@
+name: build
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One release run at a time: two in parallel would compute the same next tag.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+      - run: gofmt -l . | tee /tmp/fmt && test ! -s /tmp/fmt
+      - run: go vet ./...
+      - run: go test ./...
+      # The drive code is Linux-only by construction; this proves the rest
+      # still compiles where it is not, so the build tags stay honest.
+      - run: GOOS=darwin go build ./... && GOOS=windows go build ./...
+
+  # The tag is decided before anything is built, because it is part of every
+  # file name the build produces.
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0   # tags, so today's releases can be counted
+      - name: Pick the next vYYYYMMDD.N tag
+        id: tag
+        run: |
+          date="v$(date -u +%Y%m%d)"
+          # Highest N already used today, 0 when today has no release yet.
+          n=$(git tag --list "${date}.*" \
+              | sed "s/^${date}\.//" \
+              | grep -E '^[0-9]+$' \
+              | sort -n | tail -1)
+          tag="${date}.$(( ${n:-0} + 1 ))"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "next release: ${tag}" >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    needs: [test, version]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # `label` is what users see in the file name; goarch is what Go calls
+        # it. ripperX uses no cgo, so every one of these is a static binary
+        # that runs on glibc and musl systems alike.
+        #
+        # mips and mipsel were here and are not any more: the pure-Go SQLite
+        # the scan history is kept in does not support them. A MIPS router is
+        # not a machine with a DVD writer in it, so the history is worth more
+        # than the target.
+        include:
+          - {label: x86_64,  goarch: amd64}
+          - {label: x86,     goarch: '386'}
+          - {label: aarch64, goarch: arm64}
+          - {label: armv7,   goarch: arm, goarm: '7'}
+          - {label: riscv64, goarch: riscv64}
+    env:
+      NAME: ripperx-${{ needs.version.outputs.tag }}-linux-${{ matrix.label }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Build
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+          GOMIPS: ${{ matrix.gomips }}
+        run: |
+          mkdir -p dist
+          go build -trimpath -buildvcs=false \
+            -ldflags "-s -w -X main.version=${{ needs.version.outputs.tag }}" \
+            -o "dist/${NAME}" ./cmd/ripperx
+          file "dist/${NAME}"
+
+      - name: Checksums
+        run: cd dist && sha256sum "${NAME}" > "${NAME}.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.NAME }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    # Pushes to the default branch and manual runs cut a release; pull
+    # requests stop at the artifacts above.
+    if: github.event_name != 'pull_request'
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Collect checksums into one file
+        run: cat dist/*.sha256 | sort -k2 > dist/SHA256SUMS && rm -f dist/*.sha256
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: ${{ needs.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          files: dist/*
+          generate_release_notes: true
+          body: |
+            Static binaries, no libc dependency: each build runs on glibc and
+            musl systems alike, and needs no libcdio, no SANE and no Python.
+
+            ripperX talks to the drives in SCSI MMC through `/dev/sr*`, so it
+            needs read/write access to those device nodes - membership of the
+            `cdrom` group, or running as root. Burning additionally needs
+            `xorriso` (or `cdrecord`, or `wodim`) on PATH.
+
+                chmod +x ripperx-${{ needs.version.outputs.tag }}-linux-x86_64
+                ./ripperx-${{ needs.version.outputs.tag }}-linux-x86_64 -addr 0.0.0.0:8080 -out /srv/images

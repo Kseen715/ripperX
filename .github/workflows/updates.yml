@@ -1,0 +1,125 @@
+name: updates
+
+# Everything this repository pins has a newer version sooner or later: the Go
+# toolchain, the two modules, the actions above, and the burner programs
+# ripperX shells out to. This looks at all of them once a week and writes what
+# it found into one issue, which it keeps up to date rather than opening a new
+# one every Monday.
+#
+# It only reports. Nothing here edits go.mod or a workflow: an update that
+# lands without a person reading it is how a build breaks on a Sunday.
+
+on:
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Go toolchain
+        id: toolchain
+        run: |
+          have=$(go version | awk '{print $3}' | sed 's/^go//')
+          want=$(curl -fsSL 'https://go.dev/dl/?mode=json' | grep -m1 '"version"' | sed 's/.*"go\([^"]*\)".*/\1/')
+          pinned=$(grep -m1 '^go ' go.mod | awk '{print $2}')
+          {
+            echo "### Go"
+            echo
+            echo "| what | version |"
+            echo "| --- | --- |"
+            echo "| pinned in go.mod | \`$pinned\` |"
+            echo "| used by this run | \`$have\` |"
+            echo "| latest release | \`$want\` |"
+          } > toolchain.md
+          cat toolchain.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Modules
+        run: |
+          {
+            echo
+            echo "### Modules"
+            echo
+            # -u lists the newest version of each dependency beside the one in
+            # use; a line with only one version is already current.
+            out=$(go list -m -u -f '{{if .Update}}| `{{.Path}}` | `{{.Version}}` | `{{.Update.Version}}` |{{end}}' all | grep . || true)
+            if [ -z "$out" ]; then
+              echo "Every module is at its newest version."
+            else
+              echo "| module | in use | newest |"
+              echo "| --- | --- | --- |"
+              echo "$out"
+            fi
+          } > modules.md
+          cat modules.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Actions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo
+            echo "### Actions"
+            echo
+            echo "| action | pinned | newest |"
+            echo "| --- | --- | --- |"
+            # Every `uses:` line in every workflow, deduplicated.
+            grep -rhoE 'uses: [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@v[0-9]+' .github/workflows \
+              | sed 's/uses: //' | sort -u | while read -r ref; do
+              repo="${ref%@*}"
+              pinned="${ref#*@}"
+              latest=$(gh api "repos/$repo/releases/latest" --jq .tag_name 2>/dev/null || echo '?')
+              echo "| \`$repo\` | \`$pinned\` | \`$latest\` |"
+            done
+          } > actions.md
+          cat actions.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Burner programs
+        run: |
+          # ripperX hands the write to whichever of these is installed, so the
+          # versions the runner's distribution ships are worth recording: a
+          # burn bug is nearly always one of theirs rather than ours.
+          {
+            echo
+            echo "### Burner programs on the runner"
+            echo
+            echo '```'
+            for bin in xorriso cdrecord wodim cdrdao; do
+              if command -v "$bin" >/dev/null; then
+                printf '%-10s %s\n' "$bin" "$("$bin" --version 2>&1 | head -1)"
+              else
+                printf '%-10s not installed\n' "$bin"
+              fi
+            done
+            echo '```'
+          } > burners.md
+          cat burners.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Write it into one issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title='Dependency and toolchain versions'
+          body=$(cat toolchain.md modules.md actions.md burners.md)
+          body="$body
+
+          <sub>Written by the \`updates\` workflow on $(date -u +%Y-%m-%d). Nothing here has been changed for you.</sub>"
+          existing=$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --body "$body"
+            echo "updated issue #$existing"
+          else
+            gh issue create --title "$title" --body "$body" --label dependencies || \
+              gh issue create --title "$title" --body "$body"
+          fi

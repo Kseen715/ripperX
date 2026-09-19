@@ -1,0 +1,160 @@
+/* The chrome every page of this server is drawn in: the palette, the masthead,
+   the panels with their chamfered corners, the buttons and the type. A page
+   adds only what is its own - the scanner stage on the main page, the endpoint
+   list on the docs page - so the two cannot drift apart.
+
+   Grayscale everywhere; --accent is used only on primary action buttons.
+   Corners are square, with 45-degree chamfers cut where an edge wants
+   emphasis. No rounding, no shadows, no gradients. */
+:root {
+  --bg:      #eeeeee;
+  --panel:   #fafafa;
+  --sunken:  #e4e4e4;
+  --ink:     #111111;
+  --ink-2:   #444444;
+  --muted:   #767676;
+  --line:    #111111;
+  --hair:    #c4c4c4;
+  --grid:    #dcdcdc;
+  --accent:      #b3122c;
+  --accent-ink:  #ffffff;
+  --chamfer: 10px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:     #0e0e0e;
+    --panel:  #181818;
+    --sunken: #0a0a0a;
+    --ink:    #ededed;
+    --ink-2:  #bdbdbd;
+    --muted:  #8a8a8a;
+    --line:   #ededed;
+    --hair:   #3a3a3a;
+    --grid:   #1d1d1d;
+    --accent:     #e01e3c;
+    --accent-ink: #0e0e0e;
+  }
+}
+* { box-sizing: border-box; border-radius: 0 !important; }
+/* Must outrank a rule like #stage img { display: block }, or a src-less <img>
+   shows the browser's broken-image glyph. */
+[hidden] { display: none !important; }
+body {
+  margin: 0; padding: 28px 16px; background: var(--bg); color: var(--ink);
+  font: 14px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  /* Faint vector grid: grayscale, purely structural. */
+  background-image:
+    linear-gradient(to right, var(--grid) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--grid) 1px, transparent 1px);
+  background-size: 72px 72px, 72px 72px;
+}
+.wrap { max-width: 1140px; margin: 0 auto; }
+
+.mono, code, dd, .tag {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+/* Masthead with registration marks. */
+header {
+  border: 1px solid var(--line); background: var(--panel);
+  padding: 14px 16px; margin-bottom: 16px; position: relative;
+}
+/* Registration mark, kept off the chamfered corners. */
+.regmark {
+  position: absolute; top: 10px; right: 12px; width: 11px; height: 11px;
+  background:
+    linear-gradient(var(--muted), var(--muted)) center/100% 1px no-repeat,
+    linear-gradient(var(--muted), var(--muted)) center/1px 100% no-repeat;
+}
+h1 {
+  font-size: 13px; letter-spacing: .18em; text-transform: uppercase;
+  margin: 0 0 6px; font-weight: 700;
+}
+
+.panel {
+  background: var(--panel); border: 1px solid var(--line);
+  padding: 14px; margin-bottom: 16px;
+}
+/* 45-degree chamfer on two opposing corners, with the border continuing
+   around the diagonal. The pseudo-element sits over the square corner,
+   fills the cut-away part with the page colour and strokes the diagonal. */
+.cut { position: relative; }
+.cut::before, .cut::after {
+  content: ""; position: absolute; width: var(--chamfer); height: var(--chamfer);
+  pointer-events: none;
+}
+.cut::before {
+  top: -1px; left: -1px;
+  background: linear-gradient(to bottom right,
+    var(--bg) calc(50% - .5px), var(--line) calc(50% - .5px) calc(50% + .5px),
+    var(--panel) calc(50% + .5px));
+}
+.cut::after {
+  bottom: -1px; right: -1px;
+  background: linear-gradient(to top left,
+    var(--bg) calc(50% - .5px), var(--line) calc(50% - .5px) calc(50% + .5px),
+    var(--panel) calc(50% + .5px));
+}
+.label {
+  font-size: 10px; letter-spacing: .16em; text-transform: uppercase;
+  color: var(--muted); margin: 0 0 10px; font-weight: 700;
+}
+
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+
+button, select, a.btn {
+  font: inherit; font-size: 13px; padding: 7px 13px; background: var(--panel);
+  color: var(--ink); border: 1px solid var(--line); cursor: pointer;
+  text-decoration: none; display: inline-block;
+}
+button, a.btn { position: relative; }
+/* 45-degree corner mark; currentColor keeps it grayscale on plain buttons and
+   ink-on-accent on primary ones. */
+button::after, a.btn::after {
+  content: ""; position: absolute; top: 0; right: 0; width: 7px; height: 7px;
+  background: linear-gradient(to bottom left, currentColor 0 50%, transparent 50%);
+  opacity: .5;
+}
+/* Exclude the styled variants: this rule only sets a background, so on a
+   primary or active button it would replace the accent while leaving the
+   light text in place - unreadable. */
+button:hover:not(:disabled):not(.primary):not(.active),
+a.btn:hover { background: var(--sunken); }
+button.primary {
+  background: var(--accent); color: var(--accent-ink); border-color: var(--accent);
+  font-weight: 700; letter-spacing: .04em;
+}
+button.primary:hover:not(:disabled) {
+  background: var(--accent); color: var(--accent-ink); filter: brightness(1.18);
+}
+button:disabled { opacity: .45; cursor: not-allowed; }
+/* Drop the accent when disabled: a greyed-out red reads as an error, not as
+   an unavailable action. */
+button.primary:disabled {
+  background: var(--panel); color: var(--muted); border-color: var(--hair);
+}
+/* Selected state for chrome toggles: inverted, still grayscale. */
+button.active { background: var(--ink); color: var(--panel); border-color: var(--ink); font-weight: 700; }
+button.active:hover:not(:disabled) { background: var(--ink); }
+button:focus-visible, a.btn:focus-visible, select:focus-visible {
+  outline: 2px solid var(--ink); outline-offset: 2px;
+}
+label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .1em; }
+
+dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; font-size: 12px; }
+dt { color: var(--muted); text-transform: uppercase; letter-spacing: .1em; }
+dd { margin: 0; font-variant-numeric: tabular-nums; color: var(--ink); }
+
+.note, .warn, .err { padding: 10px 12px; margin-bottom: 12px; border: 1px solid var(--line); font-size: 13px; }
+/* Grayscale, distinguished by hatching rather than hue. */
+.warn {
+  background: repeating-linear-gradient(45deg,
+    transparent 0 7px, var(--hair) 7px 8px);
+}
+.err { background: var(--sunken); border-left: 5px solid var(--ink); white-space: pre-wrap; }
+
+hr { border: 0; border-top: 1px solid var(--hair); margin: 14px 0; }
+.muted { color: var(--muted); }
+code { font-size: 11px; color: var(--ink-2); word-break: break-all; }
+a { color: var(--ink); }
+.foot { font-size: 11px; color: var(--muted); margin-top: 18px; line-height: 1.7; }
