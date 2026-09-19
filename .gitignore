@@ -1,6 +1,8 @@
 # Build output.
 /ripperx
 /dist/
+/.gocache/
+*.run
 
 # Images and rips, in case anyone points -out at the working directory.
 *.iso

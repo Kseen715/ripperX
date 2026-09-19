@@ -87,6 +87,38 @@ service account is in the `cdrom` group.
   database; only a job that was still running is lost, and that is not
   something to pretend survived.
 
+## Installing it
+
+```
+sudo ./install.sh
+```
+
+That builds the binary, installs `xorriso` if it is missing, creates a
+`ripperx` system user in whichever group owns the drive nodes on this
+distribution, writes `/etc/ripperx.conf`, and enables a systemd service that
+comes back after a reboot. It listens on `127.0.0.1:8080` unless told
+otherwise with `--addr`, because ripperX starts with no password set and a
+service that hands out a machine's drives should not appear on the network
+because somebody ran an installer.
+
+```
+sudo ./install.sh --addr 0.0.0.0:8080   # reachable from the rest of the house
+sudo ./install.sh --user me             # run as an existing user, not a new one
+sudo ./install.sh --no-service          # just the binary; start it by hand
+```
+
+Every release also carries a `.run` for each architecture: the same
+installer with the built binary inside it, so the machine needs no Go and no
+checkout.
+
+```
+chmod +x ripperx-1.2.3-linux-x86_64.run
+sudo ./ripperx-1.2.3-linux-x86_64.run
+```
+
+An existing `/etc/ripperx.conf` is never overwritten — it is the one place a
+password lives.
+
 ## Running it
 
 ```
@@ -97,19 +129,21 @@ Then open `http://<host>:8080`. The HTTP interface documents itself at
 `/docs`.
 
 ripperX needs read and write access to the drive nodes — membership of the
-`cdrom` group, or root. Burning additionally needs `xorriso` on `PATH`
-(`cdrecord` and `wodim` are used if it is not there):
+`cdrom` group (`optical` on Arch and Void), or root. Burning additionally
+needs `xorriso` on `PATH` (`cdrecord` and `wodim` are used if it is not
+there):
 
 ```
 apt install xorriso        # Debian, Ubuntu
 dnf install xorriso        # Fedora
 ```
 
-`examples/systemd/ripperx.service` runs it as a confined service, and
-`examples/ripperx.conf` documents every setting. Anything in the settings
-file can also be a command-line flag, and the flag wins; the three passwords
-are the exception, because an argument is readable by every user on the
-machine through `/proc`.
+`examples/systemd/ripperx.service` is the unit `install.sh` renders — it
+runs ripperX as a confined service that can reach the drive nodes and its
+own directory and nothing else — and `examples/ripperx.conf` documents every
+setting. Anything in the settings file can also be a command-line flag, and
+the flag wins; the three passwords are the exception, because an argument is
+readable by every user on the machine through `/proc`.
 
 ### A login
 

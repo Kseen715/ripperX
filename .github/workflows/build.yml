@@ -96,8 +96,15 @@ jobs:
             -o "dist/${NAME}" ./cmd/ripperx
           file "dist/${NAME}"
 
+      # A self-extracting installer beside the bare binary: the same
+      # install.sh the repository has, with the built binary and the example
+      # settings and unit inside it. The machine being installed onto needs
+      # no Go and no checkout.
+      - name: Package the .run installer
+        run: scripts/make-run.sh "dist/${NAME}" "${{ matrix.label }}" "dist/${NAME}.run"
+
       - name: Checksums
-        run: cd dist && sha256sum "${NAME}" > "${NAME}.sha256"
+        run: cd dist && sha256sum "${NAME}" "${NAME}.run" > "${NAME}.sha256"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -137,6 +144,16 @@ jobs:
             needs read/write access to those device nodes - membership of the
             `cdrom` group, or running as root. Burning additionally needs
             `xorriso` (or `cdrecord`, or `wodim`) on PATH.
+
+            The `.run` beside each binary is a self-extracting installer. It
+            creates a `ripperx` system user in the disc group, writes
+            `/etc/ripperx.conf`, installs a hardened systemd unit and starts
+            it - so the whole of the above is arranged for you.
+
+                chmod +x ripperx-${{ needs.version.outputs.tag }}-linux-x86_64.run
+                sudo ./ripperx-${{ needs.version.outputs.tag }}-linux-x86_64.run
+
+            Or run the binary yourself, with nothing installed:
 
                 chmod +x ripperx-${{ needs.version.outputs.tag }}-linux-x86_64
                 ./ripperx-${{ needs.version.outputs.tag }}-linux-x86_64 -addr 0.0.0.0:8080 -out /srv/images

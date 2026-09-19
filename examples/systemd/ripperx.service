@@ -1,3 +1,17 @@
+# System-wide unit: ripperX runs as one named user, in the group that owns
+# the drive nodes, from boot onwards. This is what `install.sh` renders and
+# installs into /etc/systemd/system/ripperx.service, substituting the user,
+# the disc group and the binary's path.
+#
+# Install by hand:
+#   sudo cp examples/systemd/ripperx.service /etc/systemd/system/ripperx.service
+#   sudo sed -i 's/%USER%/ripperx/g; s/%DISCGROUP%/cdrom/' \
+#       /etc/systemd/system/ripperx.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now ripperx
+#
+# The disc group is cdrom on Debian and Ubuntu, optical on Arch and Void.
+# Check which one owns the nodes with:  ls -l /dev/sr0 /dev/sg*
+
 [Unit]
 Description=ripperX - optical drives over HTTP
 Documentation=https://github.com/Kseen715/ripperX
@@ -5,22 +19,28 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
+# No flags on purpose. Every setting lives in /etc/ripperx.conf, and a flag
+# given here would silently win over that file - including the address, which
+# is the one people change first.
 ExecStart=/usr/local/bin/ripperx
 Restart=on-failure
 RestartSec=5
 
 # ripperX needs the drive nodes, and burning needs to reprogram the drive,
 # which the kernel only allows to a process with CAP_SYS_RAWIO. Running as a
-# dedicated user in the cdrom group is enough for reading; a burn also needs
+# dedicated user in the disc group is enough for reading; a burn also needs
 # that capability, which is why it is granted rather than running as root.
-User=ripperx
-Group=ripperx
-SupplementaryGroups=cdrom
+User=%USER%
+Group=%USER%
+SupplementaryGroups=%DISCGROUP%
 AmbientCapabilities=CAP_SYS_RAWIO
 CapabilityBoundingSet=CAP_SYS_RAWIO
 
-# Where images are kept. systemd creates it and hands it over.
+# Where images and the history database are kept. systemd creates it and
+# hands it over. The settings file points at it rather than the unit setting
+# a flag, so changing where images land is an edit there and a restart.
 StateDirectory=ripperx
+WorkingDirectory=/var/lib/ripperx
 Environment=HOME=/var/lib/ripperx
 
 # Everything below is the machine ripperX is not allowed to touch. It reads
