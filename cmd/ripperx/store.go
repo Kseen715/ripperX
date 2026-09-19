@@ -15,7 +15,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/hirochachacha/go-smb2"
-	"golang.org/x/sys/unix"
 )
 
 // The image store is where rips are written and where burns are read from.
@@ -238,16 +237,7 @@ func (l *localStore) Kind() string     { return "local" }
 // FreeBytes is what stops a rip from filling a root filesystem. The figure
 // is the space available to this user, not the total free space, which is
 // what actually matters on a filesystem with reserved blocks.
-func (l *localStore) Space() (int64, int64, bool) {
-	var st unix.Statfs_t
-	if err := unix.Statfs(l.dir, &st); err != nil {
-		return 0, 0, false
-	}
-	// Bavail rather than Bfree: the blocks reserved for root are not space
-	// a rip can use, and counting them means promising room that is not
-	// there.
-	return int64(st.Bavail) * int64(st.Bsize), int64(st.Blocks) * int64(st.Bsize), true
-}
+func (l *localStore) Space() (int64, int64, bool) { return diskSpace(l.dir) }
 
 // localPath is the real path of a stored file, which the burner program
 // needs because it is a separate process and cannot be handed a file
