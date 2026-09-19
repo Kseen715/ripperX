@@ -7,10 +7,12 @@ import (
 	"compress/gzip"
 	"context"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Kseen715/ripperX/iso9660"
+	"github.com/Kseen715/ripperX/mmc"
 	"github.com/dsnet/compress/bzip2"
 	"github.com/ulikunitz/xz"
 )
@@ -98,7 +100,7 @@ func TestEveryOfferedFormatWorks(t *testing.T) {
 			continue
 		}
 		e := iso9660.Entry{Name: "a.txt", Path: "/dir/a.txt", Size: 5, ModTime: time.Now()}
-		if err := w.addFile(e, bytes.NewReader([]byte("hello"))); err != nil {
+		if err := w.addFile("dir/a.txt", e, bytes.NewReader([]byte("hello"))); err != nil {
 			t.Errorf("%s: adding a file: %v", f.ID, err)
 			continue
 		}
@@ -147,7 +149,7 @@ func TestArchivesUnpack(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, e := range entries {
-			err := w.addFile(iso9660.Entry{
+			err := w.addFile(strings.TrimPrefix(e.path, "/"), iso9660.Entry{
 				Name: e.path, Path: e.path, Size: int64(len(e.body)), ModTime: time.Now(),
 			}, bytes.NewReader([]byte(e.body)))
 			if err != nil {
@@ -237,11 +239,11 @@ func TestShortFileDoesNotCorruptTheRest(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Claims 20 bytes, supplies 3.
-	err = w.addFile(iso9660.Entry{Name: "bad", Path: "/bad", Size: 20}, bytes.NewReader([]byte("abc")))
+	err = w.addFile("bad", iso9660.Entry{Name: "bad", Path: "/bad", Size: 20}, bytes.NewReader([]byte("abc")))
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = w.addFile(iso9660.Entry{Name: "good", Path: "/good", Size: 4}, bytes.NewReader([]byte("fine")))
+	err = w.addFile("good", iso9660.Entry{Name: "good", Path: "/good", Size: 4}, bytes.NewReader([]byte("fine")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +277,7 @@ func TestSymlinksSurvive(t *testing.T) {
 	f, _ := archiveByID("tar")
 	var buf bytes.Buffer
 	w, _ := newArchiveWriter(f, &buf)
-	if err := w.addSymlink(e); err != nil {
+	if err := w.addSymlink("link", e); err != nil {
 		t.Fatal(err)
 	}
 	w.Close()
@@ -333,5 +335,85 @@ func TestArchiveProgressCountsSourceBytes(t *testing.T) {
 	}
 	if lastDone != plan.bytes {
 		t.Errorf("progress ended at %d, want the plan's %d", lastDone, plan.bytes)
+	}
+}
+
+// What a rip is called, and what the paths inside it look like. Both were
+// wrong in the same way: they answered with the whole disc when the
+// question was about one folder on it.
+func TestAnArchiveIsRootedAtWhatWasChosen(t *testing.T) {
+	cases := []struct {
+		what  string
+		paths []string
+		root  string
+		name  string
+	}{
+		{"one folder deep in the tree", []string{"/Drivers/Win7"}, "Drivers", "Win7"},
+		{"a folder at the top", []string{"/VIDEO_TS"}, "", "VIDEO_TS"},
+		{"the whole disc", []string{"/"}, "", ""},
+		{"one file", []string{"/Drivers/Win7/setup.exe"}, "Drivers/Win7", "setup.exe"},
+		{"several files sharing a folder",
+			[]string{"/Drivers/Win7/a.inf", "/Drivers/Win7/b.inf"}, "Drivers/Win7", ""},
+		{"several folders that do not",
+			[]string{"/Drivers/Win7", "/Docs/readme"}, "", ""},
+	}
+	for _, c := range cases {
+		if got := commonParent(c.paths); got != c.root {
+			t.Errorf("%s: the part to trim is %q, want %q", c.what, got, c.root)
+		}
+		if got := suggestFrom(c.paths); got != c.name {
+			t.Errorf("%s: the name it suggests is %q, want %q", c.what, got, c.name)
+		}
+	}
+
+	// And what that means for the entries themselves: choosing
+	// /Drivers/Win7 puts Win7 at the root of the archive rather than a
+	// Drivers folder holding a Win7 folder holding the files.
+	plan := filePlan{root: commonParent([]string{"/Drivers/Win7"})}
+	got := plan.under(iso9660.Entry{Path: "/Drivers/Win7/net/e1000.sys"})
+	if got != "Win7/net/e1000.sys" {
+		t.Errorf("the entry is called %q inside the archive", got)
+	}
+}
+
+// A name that was typed is the name. A name that was invented carries the
+// date, so two rips of the same disc do not collide.
+func TestAChosenNameIsUsedAsItIs(t *testing.T) {
+	s := &server{store: emptyStore{}}
+	disc := &mmc.Disc{ProfileName: "DVD-ROM"}
+
+	name, chosen := s.ripName(&drive{}, disc, "movies", "VIDEO_TS")
+	if name != "movies" || !chosen {
+		t.Errorf("a typed name came out as %q (chosen %v), want it used as it is", name, chosen)
+	}
+	name, chosen = s.ripName(&drive{}, disc, "", "VIDEO_TS")
+	if chosen {
+		t.Error("an invented name was reported as chosen")
+	}
+	if !strings.HasPrefix(name, "VIDEO_TS-") || len(name) != len("VIDEO_TS-20260919-211247") {
+		t.Errorf("an invented name is %q, want the folder and the date", name)
+	}
+	// Nothing to go on: the disc itself.
+	name, _ = s.ripName(&drive{}, disc, "", "")
+	if !strings.HasPrefix(name, "DVD-ROM-") {
+		t.Errorf("with nothing chosen the name is %q, want the disc's", name)
+	}
+}
+
+// Two archive suffixes are one suffix, or "disc.tar.gz" twice gives
+// "disc.tar-2.gz".
+func TestSplitExtensionKeepsTwoPartSuffixes(t *testing.T) {
+	cases := map[string][2]string{
+		"disc.tar.gz": {"disc", ".tar.gz"},
+		"disc.zip":    {"disc", ".zip"},
+		"disc.iso":    {"disc", ".iso"},
+		"disc":        {"disc", ""},
+		"a.b.iso":     {"a.b", ".iso"},
+	}
+	for in, want := range cases {
+		stem, ext := splitExtension(in)
+		if stem != want[0] || ext != want[1] {
+			t.Errorf("splitExtension(%q) = %q, %q, want %q, %q", in, stem, ext, want[0], want[1])
+		}
 	}
 }

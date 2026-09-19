@@ -85,12 +85,23 @@ func (s *server) handleRip(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, ripResponse{Job: *job})
 }
 
-// discName is the name a rip is given when the request did not supply one:
-// the disc's own label where it has a readable one, and the drive and the
-// date where it does not. Two rips of the same disc never collide, because
-// the timestamp is always there.
-func (s *server) discName(d *drive, disc *mmc.Disc, requested string) string {
-	base := safeName(requested, "")
+// ripName is the name a rip is written under, and whether it was chosen
+// rather than invented.
+//
+// A name somebody typed is the name, exactly - that is what asking for one
+// means, and "movies" coming back as "movies-20260919-211247.zip" is not a
+// rename. An invented name carries the date instead, so that two rips of
+// the same disc never collide.
+//
+// What is invented depends on what was asked for. A rip of one folder is
+// called after that folder: it is what the person pressing the button is
+// looking at, and it is already what the same folder downloaded to a
+// browser is called. Only a rip of the whole disc falls back to the disc.
+func (s *server) ripName(d *drive, disc *mmc.Disc, requested, suggested string) (string, bool) {
+	if name := safeName(requested, ""); name != "" {
+		return name, true
+	}
+	base := safeName(suggested, "")
 	if base == "" {
 		if fsys, err := d.filesystem(); err == nil {
 			base = safeName(fsys.Volume().VolumeID, "")
@@ -99,7 +110,67 @@ func (s *server) discName(d *drive, disc *mmc.Disc, requested string) string {
 	if base == "" {
 		base = safeName(disc.ProfileName, "disc")
 	}
-	return base + "-" + time.Now().Format("20060102-150405")
+	return base + "-" + time.Now().Format("20060102-150405"), false
+}
+
+// suggestFrom is what a rip of these paths is called when nobody said. One
+// path names itself; several have no one name between them, so the disc
+// does it. Taking the root is taking the disc, and is named after it.
+func suggestFrom(paths []string) string {
+	if len(paths) != 1 {
+		return ""
+	}
+	clean := path.Clean("/" + strings.TrimPrefix(paths[0], "/"))
+	if clean == "/" {
+		return ""
+	}
+	return path.Base(clean)
+}
+
+// unique keeps a rip from replacing one that is already there. Silently
+// overwriting a four-gigabyte image because its name was typed twice is not
+// a thing to do, so the second one gets a number.
+func (s *server) unique(name string) string {
+	files, err := s.store.List()
+	if err != nil {
+		return name
+	}
+	taken := make(map[string]bool, len(files))
+	for _, f := range files {
+		taken[strings.ToLower(f.Name)] = true
+	}
+	if !taken[strings.ToLower(name)] {
+		return name
+	}
+	stem, ext := splitExtension(name)
+	for i := 2; i < 1000; i++ {
+		try := fmt.Sprintf("%s-%d%s", stem, i, ext)
+		if !taken[strings.ToLower(try)] {
+			return try
+		}
+	}
+	return stem + "-" + time.Now().Format("20060102-150405") + ext
+}
+
+// splitExtension keeps a two-part archive suffix together, so a second
+// "disc.tar.gz" becomes "disc-2.tar.gz" and not "disc.tar-2.gz".
+func splitExtension(name string) (stem, ext string) {
+	if i, ok := archiveOf(name); ok {
+		suffix := archiveExtensions[i].suffix
+		return name[:len(name)-len(suffix)], name[len(name)-len(suffix):]
+	}
+	ext = path.Ext(name)
+	return strings.TrimSuffix(name, ext), ext
+}
+
+// withExtension keeps the extension of what a file came from when the name
+// chosen for it has none, so renaming VTS_01_1.VOB to "opening scene" still
+// produces something a player will open.
+func withExtension(name, like string) string {
+	if path.Ext(name) != "" {
+		return name
+	}
+	return name + path.Ext(like)
 }
 
 func (s *server) startRip(d *drive, disc *mmc.Disc, req ripRequest) (*Job, error) {
@@ -107,7 +178,7 @@ func (s *server) startRip(d *drive, disc *mmc.Disc, req ripRequest) (*Job, error
 	if speed == 0 {
 		speed = s.readSpeedKB
 	}
-	base := s.discName(d, disc, req.Name)
+	base, chosen := s.ripName(d, disc, req.Name, suggestFrom(req.Paths))
 
 	switch req.Kind {
 	case "iso":
@@ -124,7 +195,7 @@ func (s *server) startRip(d *drive, disc *mmc.Disc, req ripRequest) (*Job, error
 				sectors = n
 			}
 		}
-		name := base + ".iso"
+		name := s.unique(base + ".iso")
 		return s.jobs.startOnDrive(d, "iso",
 			fmt.Sprintf("%s from %s", name, d.id), sectors*mmc.SectorData,
 			func(ctx context.Context, rec *jobRecord) error {
@@ -135,7 +206,7 @@ func (s *server) startRip(d *drive, disc *mmc.Disc, req ripRequest) (*Job, error
 		if !disc.RawReadable {
 			return nil, errors.New("this drive will not hand over raw sectors from this disc, so an exact .img is not possible; rip an .iso instead")
 		}
-		name := base + ".img"
+		name := s.unique(base + ".img")
 		return s.jobs.startOnDrive(d, "img",
 			fmt.Sprintf("%s from %s", name, d.id), disc.Sectors*mmc.SectorRaw,
 			func(ctx context.Context, rec *jobRecord) error {
@@ -187,7 +258,7 @@ func (s *server) startRip(d *drive, disc *mmc.Disc, req ripRequest) (*Job, error
 		}
 		return s.jobs.startOnDrive(d, "files", plan.label(d.id), plan.bytes,
 			func(ctx context.Context, rec *jobRecord) error {
-				return s.ripFiles(ctx, rec, d, base, fsys, plan, format, speed)
+				return s.ripFiles(ctx, rec, d, base, chosen, fsys, plan, format, speed)
 			})
 	}
 	return nil, fmt.Errorf("no such rip kind %q; it is one of iso, img, audio or files", req.Kind)
@@ -491,6 +562,20 @@ type filePlan struct {
 	files  []iso9660.Entry
 	bytes  int64
 	single bool // exactly one file was asked for, so it is written as itself
+	// root is the part of every path that is not worth carrying into the
+	// archive: the directory the chosen things sit in. Taking /Drivers/Win7
+	// gives an archive with Win7 at its root rather than one with a Drivers
+	// folder holding a Win7 folder holding the files.
+	root string
+}
+
+// under returns the name an entry takes inside the archive.
+func (p filePlan) under(e iso9660.Entry) string {
+	name := strings.TrimPrefix(e.Path, "/")
+	if p.root != "" {
+		name = strings.TrimPrefix(name, p.root+"/")
+	}
+	return name
 }
 
 func (p filePlan) label(driveID string) string {
@@ -528,7 +613,38 @@ func planFiles(fsys discfs.FS, paths []string) (filePlan, error) {
 		}
 	}
 	plan.single = len(paths) == 1 && len(plan.files) == 1 && plan.files[0].Path == path.Clean("/"+strings.TrimPrefix(paths[0], "/"))
+	plan.root = commonParent(paths)
 	return plan, nil
+}
+
+// commonParent is the directory the chosen paths sit in, which is the part
+// of them the archive does not need. One path gives its own parent; several
+// give the deepest directory they share; anything chosen at the root of the
+// disc gives nothing to trim.
+func commonParent(paths []string) string {
+	var parent []string
+	for i, p := range paths {
+		clean := path.Clean("/" + strings.TrimPrefix(p, "/"))
+		dir := strings.TrimPrefix(path.Dir(clean), "/")
+		parts := []string{}
+		if dir != "" && dir != "." {
+			parts = strings.Split(dir, "/")
+		}
+		if i == 0 {
+			parent = parts
+			continue
+		}
+		if len(parts) < len(parent) {
+			parent = parent[:len(parts)]
+		}
+		for j := range parent {
+			if parts[j] != parent[j] {
+				parent = parent[:j]
+				break
+			}
+		}
+	}
+	return strings.Join(parent, "/")
 }
 
 // ripFiles pulls files off the disc into the store. One file is written as
@@ -538,7 +654,7 @@ func planFiles(fsys discfs.FS, paths []string) (filePlan, error) {
 // fsys is passed in rather than fetched here: by the time this runs the job
 // holds the drive, and reading the volume descriptors would be refused as a
 // borrow of a drive that is in use.
-func (s *server) ripFiles(ctx context.Context, rec *jobRecord, d *drive, base string, fsys discfs.FS, plan filePlan, format archiveFormat, speedKB int) error {
+func (s *server) ripFiles(ctx context.Context, rec *jobRecord, d *drive, base string, chosen bool, fsys discfs.FS, plan filePlan, format archiveFormat, speedKB int) error {
 	if err := s.checkRoom(plan.bytes); err != nil {
 		return err
 	}
@@ -554,7 +670,13 @@ func (s *server) ripFiles(ctx context.Context, rec *jobRecord, d *drive, base st
 	}
 	if plan.single {
 		e := plan.files[0]
+		// One file is written as itself, under the name it has on the disc
+		// unless another was asked for.
 		name := safeName(path.Base(e.Path), "file")
+		if chosen {
+			name = withExtension(base, e.Path)
+		}
+		name = s.unique(name)
 		rec.setTotal(e.Size)
 		out, err := s.newSink(rec, name, 0)
 		if err != nil {
@@ -583,7 +705,7 @@ func (s *server) ripFiles(ctx context.Context, rec *jobRecord, d *drive, base st
 		return nil
 	}
 
-	name := base + format.Extension
+	name := s.unique(base + format.Extension)
 	rec.setTotal(plan.bytes)
 	out, err := s.newSink(rec, name, 0)
 	if err != nil {

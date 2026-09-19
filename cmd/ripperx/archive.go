@@ -73,8 +73,8 @@ type formatsResponse struct {
 // go in, and at the end it is closed. The compressors sit underneath the
 // tar and are closed in the right order by the implementation.
 type archiveWriter interface {
-	addFile(e iso9660.Entry, r io.Reader) error
-	addSymlink(e iso9660.Entry) error
+	addFile(name string, e iso9660.Entry, r io.Reader) error
+	addSymlink(name string, e iso9660.Entry) error
 	Close() error
 }
 
@@ -119,14 +119,14 @@ type tarArchive struct {
 	compressor io.WriteCloser
 }
 
-func (a *tarArchive) addFile(e iso9660.Entry, r io.Reader) error {
+func (a *tarArchive) addFile(name string, e iso9660.Entry, r io.Reader) error {
 	mode := int64(0o644)
 	if e.Mode&0o111 != 0 {
 		mode = 0o755
 	}
 	if err := a.tw.WriteHeader(&tar.Header{
 		Typeflag: tar.TypeReg,
-		Name:     archiveName(e),
+		Name:     name,
 		Size:     e.Size,
 		ModTime:  e.ModTime,
 		Mode:     mode,
@@ -140,10 +140,10 @@ func (a *tarArchive) addFile(e iso9660.Entry, r io.Reader) error {
 	return err
 }
 
-func (a *tarArchive) addSymlink(e iso9660.Entry) error {
+func (a *tarArchive) addSymlink(name string, e iso9660.Entry) error {
 	return a.tw.WriteHeader(&tar.Header{
 		Typeflag: tar.TypeSymlink,
-		Name:     archiveName(e),
+		Name:     name,
 		Linkname: e.SymlinkTarget,
 		ModTime:  e.ModTime,
 		Mode:     0o777,
@@ -162,9 +162,9 @@ func (a *tarArchive) Close() error {
 
 type zipArchive struct{ w *zip.Writer }
 
-func (a *zipArchive) addFile(e iso9660.Entry, r io.Reader) error {
+func (a *zipArchive) addFile(name string, e iso9660.Entry, r io.Reader) error {
 	h := &zip.FileHeader{
-		Name:     archiveName(e),
+		Name:     name,
 		Method:   zip.Deflate,
 		Modified: e.ModTime,
 	}
@@ -183,8 +183,8 @@ func (a *zipArchive) addFile(e iso9660.Entry, r io.Reader) error {
 	return err
 }
 
-func (a *zipArchive) addSymlink(e iso9660.Entry) error {
-	h := &zip.FileHeader{Name: archiveName(e), Modified: e.ModTime}
+func (a *zipArchive) addSymlink(name string, e iso9660.Entry) error {
+	h := &zip.FileHeader{Name: name, Modified: e.ModTime}
 	h.SetMode(fs.ModeSymlink | 0o777)
 	w, err := a.w.CreateHeader(h)
 	if err != nil {
@@ -197,12 +197,6 @@ func (a *zipArchive) addSymlink(e iso9660.Entry) error {
 }
 
 func (a *zipArchive) Close() error { return a.w.Close() }
-
-// archiveName is the path an entry gets inside the archive: the disc's own
-// path without its leading slash, so unpacking it produces the same tree.
-func archiveName(e iso9660.Entry) string {
-	return strings.TrimPrefix(e.Path, "/")
-}
 
 // alreadyCompressed lists what is not worth deflating a second time.
 var compressedExtensions = map[string]bool{
@@ -250,8 +244,12 @@ func writeArchive(ctx context.Context, w io.Writer, format archiveFormat, fsys d
 		if p.starting != nil {
 			p.starting(e)
 		}
+		// The name inside the archive comes from the plan, which knows
+		// what was chosen: taking /Drivers/Win7 gives an archive with Win7
+		// at its root, not one with the whole path to it.
+		name := plan.under(e)
 		if e.SymlinkTarget != "" {
-			if err := ar.addSymlink(e); err != nil {
+			if err := ar.addSymlink(name, e); err != nil {
 				return fmt.Errorf("%s: %w", e.Path, err)
 			}
 		} else {
@@ -259,7 +257,7 @@ func writeArchive(ctx context.Context, w io.Writer, format archiveFormat, fsys d
 			if err != nil {
 				return fmt.Errorf("%s: %w", e.Path, err)
 			}
-			if err := ar.addFile(e, src); err != nil {
+			if err := ar.addFile(name, e, src); err != nil {
 				return fmt.Errorf("%s: %w", e.Path, err)
 			}
 		}
