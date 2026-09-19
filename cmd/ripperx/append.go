@@ -89,6 +89,10 @@ func (s *server) appendBlocker(caps *mmc.Capabilities, disc *mmc.Disc) string {
 		return "this disc has been closed, so no further session can be written to it"
 	}
 	if !disc.Appendable || disc.WritableSectors <= 0 {
+		if disc.FreeSpaceError != "" {
+			return "this disc is not closed, but the drive would not say how much room is left: " +
+				disc.FreeSpaceError
+		}
 		return "this disc is full"
 	}
 	return ""

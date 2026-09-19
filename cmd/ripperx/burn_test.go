@@ -250,3 +250,36 @@ func TestXorrisoProgressLine(t *testing.T) {
 		}
 	}
 }
+
+// "The drive would not tell me how much room is left" and "there is no room
+// left" are different answers, and only one of them means give up. Reporting
+// the first as the second made a DVD with 300 MB free read as a full disc,
+// because the free-space question had been asked about the wrong track.
+func TestUnknownFreeSpaceIsNotTheSameAsFull(t *testing.T) {
+	s := &server{allowBurn: true, burner: &burner{path: "xorriso", kind: "xorriso"}}
+	writer := &mmc.Capabilities{Write: mmc.MediaSupport{DVDR: true}}
+
+	full := &mmc.Disc{
+		Present: true, Profile: mmc.ProfileDVDRSeq, Status: mmc.DiscAppendable,
+	}
+	if got := s.appendBlocker(writer, full); !strings.Contains(got, "full") {
+		t.Errorf("a disc with no room says %q, want it to say full", got)
+	}
+
+	unknown := &mmc.Disc{
+		Present: true, Profile: mmc.ProfileDVDRSeq, Status: mmc.DiscAppendable,
+		FreeSpaceError: "READ TRACK INFORMATION: a field in the command is invalid for this drive",
+	}
+	got := s.appendBlocker(writer, unknown)
+	if strings.Contains(got, "full") {
+		t.Errorf("a disc whose free space is unknown was called full: %q", got)
+	}
+	if !strings.Contains(got, "would not say") {
+		t.Errorf("the refusal does not say what actually happened: %q", got)
+	}
+	// And the reason the drive gave is passed through, because it is the
+	// only thing that makes it diagnosable.
+	if !strings.Contains(got, "READ TRACK INFORMATION") {
+		t.Errorf("the drive's own words were dropped: %q", got)
+	}
+}

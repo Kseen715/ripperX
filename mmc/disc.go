@@ -90,6 +90,17 @@ type Disc struct {
 	// say whether, where it would go, and how much room is left - which is
 	// the difference between "this disc is full" and "there is a third of a
 	// gigabyte going spare".
+	// FreeSpaceError is why the room left could not be established, when it
+	// could not. A disc with an open session whose free space is unknown is
+	// not the same thing as a full one, and saying "full" about the first
+	// was wrong.
+	FreeSpaceError string `json:"freeSpaceError,omitempty"`
+
+	// lastTrack is the last track of the last session, as the drive reports
+	// it. It is not shown - it exists because it is the only reliable way to
+	// name the track that has not been written yet.
+	lastTrack int
+
 	// LastSessionStart is the first sector of the most recent session. On a
 	// multi-session disc that is where the filesystem to read lives: the
 	// descriptors at the start of the disc describe the first session only,
@@ -193,12 +204,14 @@ func (d *Drive) ReadDisc() (*Disc, error) {
 	// How much room is left, if any. A disc that is closed has none and
 	// says so by refusing the question, which is not an error.
 	if disc.Status == DiscAppendable {
-		if err := d.readTrackInfo(disc); err != nil && !IsUnsupported(err) && !IsNoMedium(err) {
-			// Not fatal: the disc is still perfectly readable, we just
-			// cannot say how much of it is free.
-			if disc.Error == "" {
-				disc.Error = err.Error()
-			}
+		if err := d.readTrackInfo(disc); err != nil {
+			// Not fatal: the disc is still perfectly readable. But it is
+			// recorded rather than swallowed, because "the drive would not
+			// say" and "there is no room" are different answers and only
+			// one of them means stop.
+			disc.FreeSpaceError = err.Error()
+		} else if disc.WritableSectors == 0 && !disc.Appendable {
+			disc.FreeSpaceError = "the drive did not report a next writable address"
 		}
 	}
 
@@ -252,6 +265,11 @@ func (d *Drive) readDiscInfo(disc *Disc) error {
 	disc.Status = DiscStatus(buf[2] & 0x03)
 	disc.Erasable = buf[2]&0x10 != 0
 	disc.Sessions = int(buf[9])<<8 | int(buf[4])
+	// The last track of the last session. On a disc that can still be
+	// written this is the track that does not exist yet, and it is the only
+	// dependable way to name it: the table of contents does not necessarily
+	// list it, and one drive here refuses the 0xff convention outright.
+	disc.lastTrack = int(buf[11])<<8 | int(buf[6])
 	return nil
 }
 
@@ -395,19 +413,24 @@ func (d *Drive) readSessionInfo(disc *Disc) error {
 // left for it, by asking about the track that does not exist yet.
 //
 // Track 0xff means "the invisible track" and most drives answer it. The
-// HL-DT-ST here refuses that outright and wants the next track's actual
-// number instead, so that is tried second - the two together have covered
-// every drive tested.
+// HL-DT-ST here refuses it outright, so the fallback is the last track of
+// the last session, which READ DISC INFORMATION reports and which is that
+// same not-yet-written track.
+//
+// Deriving the number from the table of contents instead does not work: on
+// a DVD with three sessions on it this drive listed two tracks and knew
+// about four, so counting the listed ones asked about a track that had
+// already been written and got told there was no room - which read as a
+// full disc.
 func (d *Drive) readTrackInfo(disc *Disc) error {
 	err := d.trackInfoInto(disc, 0xff)
 	if !IsUnsupported(err) {
 		return err
 	}
-	next := 1
-	if n := len(disc.Tracks); n > 0 {
-		next = disc.Tracks[n-1].Number + 1
+	if disc.lastTrack <= 0 {
+		return err
 	}
-	return d.trackInfoInto(disc, uint32(next))
+	return d.trackInfoInto(disc, uint32(disc.lastTrack))
 }
 
 // trackInfoInto reads one track's information and takes from it what says
