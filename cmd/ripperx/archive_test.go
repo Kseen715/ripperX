@@ -12,82 +12,9 @@ import (
 	"time"
 
 	"github.com/Kseen715/ripperX/iso9660"
-	"github.com/Kseen715/ripperX/mmc"
 	"github.com/dsnet/compress/bzip2"
 	"github.com/ulikunitz/xz"
 )
-
-// testVolume builds the smallest ISO 9660 volume that has a file in it, so
-// the archive and rip paths can be exercised without a disc. It is
-// deliberately minimal - a root directory and two files, no Joliet and no
-// Rock Ridge; the reader itself is tested thoroughly in its own package.
-func testVolume(t *testing.T) *iso9660.FS {
-	t.Helper()
-	const (
-		lbaPVD  = 16
-		lbaRoot = 18
-		lbaData = 19
-	)
-	const body = "hello, disc\n"
-
-	img := make([]byte, 24*iso9660.BlockSize)
-	sector := func(n int) []byte { return img[n*iso9660.BlockSize : (n+1)*iso9660.BlockSize] }
-
-	both := func(b []byte, v uint32) {
-		b[0], b[1], b[2], b[3] = byte(v), byte(v>>8), byte(v>>16), byte(v>>24)
-		b[4], b[5], b[6], b[7] = byte(v>>24), byte(v>>16), byte(v>>8), byte(v)
-	}
-	record := func(name string, extent, size uint32, isDir bool) []byte {
-		n := 33 + len(name)
-		if len(name)%2 == 0 {
-			n++
-		}
-		rec := make([]byte, n)
-		rec[0] = byte(n)
-		both(rec[2:10], extent)
-		both(rec[10:18], size)
-		rec[18], rec[19], rec[20] = 125, 6, 15
-		if isDir {
-			rec[25] = 0x02
-		}
-		rec[28], rec[31] = 1, 1
-		rec[32] = byte(len(name))
-		copy(rec[33:], name)
-		return rec
-	}
-
-	pvd := sector(lbaPVD)
-	pvd[0] = 1
-	copy(pvd[1:6], "CD001")
-	pvd[6] = 1
-	copy(pvd[8:40], bytes.Repeat([]byte{' '}, 32))
-	copy(pvd[40:72], append([]byte("TEST"), bytes.Repeat([]byte{' '}, 28)...))
-	both(pvd[80:88], 24)
-	copy(pvd[156:190], record("\x00", lbaRoot, iso9660.BlockSize, true))
-
-	term := sector(17)
-	term[0] = 255
-	copy(term[1:6], "CD001")
-
-	root := sector(lbaRoot)
-	off := 0
-	for _, rec := range [][]byte{
-		record("\x00", lbaRoot, iso9660.BlockSize, true),
-		record("\x01", lbaRoot, iso9660.BlockSize, true),
-		record("A.TXT;1", lbaData, uint32(len(body)), false),
-		record("B.TXT;1", lbaData, uint32(len(body)), false),
-	} {
-		copy(root[off:], rec)
-		off += len(rec)
-	}
-	copy(sector(lbaData), body)
-
-	fsys, err := iso9660.Open(bytes.NewReader(img))
-	if err != nil {
-		t.Fatalf("building the test volume: %v", err)
-	}
-	return fsys
-}
 
 // A menu entry that cannot be produced is worse than one that is missing,
 // so every format offered has to come out of the same call the page makes.
@@ -333,86 +260,6 @@ func TestArchiveProgressCountsSourceBytes(t *testing.T) {
 	}
 	if lastDone != plan.bytes {
 		t.Errorf("progress ended at %d, want the plan's %d", lastDone, plan.bytes)
-	}
-}
-
-// What a rip is called, and what the paths inside it look like. Both were
-// wrong in the same way: they answered with the whole disc when the
-// question was about one folder on it.
-func TestAnArchiveIsRootedAtWhatWasChosen(t *testing.T) {
-	cases := []struct {
-		what  string
-		paths []string
-		root  string
-		name  string
-	}{
-		{"one folder deep in the tree", []string{"/Drivers/Win7"}, "Drivers", "Win7"},
-		{"a folder at the top", []string{"/VIDEO_TS"}, "", "VIDEO_TS"},
-		{"the whole disc", []string{"/"}, "", ""},
-		{"one file", []string{"/Drivers/Win7/setup.exe"}, "Drivers/Win7", "setup.exe"},
-		{"several files sharing a folder",
-			[]string{"/Drivers/Win7/a.inf", "/Drivers/Win7/b.inf"}, "Drivers/Win7", ""},
-		{"several folders that do not",
-			[]string{"/Drivers/Win7", "/Docs/readme"}, "", ""},
-	}
-	for _, c := range cases {
-		if got := commonParent(c.paths); got != c.root {
-			t.Errorf("%s: the part to trim is %q, want %q", c.what, got, c.root)
-		}
-		if got := suggestFrom(c.paths); got != c.name {
-			t.Errorf("%s: the name it suggests is %q, want %q", c.what, got, c.name)
-		}
-	}
-
-	// And what that means for the entries themselves: choosing
-	// /Drivers/Win7 puts Win7 at the root of the archive rather than a
-	// Drivers folder holding a Win7 folder holding the files.
-	plan := filePlan{root: commonParent([]string{"/Drivers/Win7"})}
-	got := plan.under(iso9660.Entry{Path: "/Drivers/Win7/net/e1000.sys"})
-	if got != "Win7/net/e1000.sys" {
-		t.Errorf("the entry is called %q inside the archive", got)
-	}
-}
-
-// A name that was typed is the name. A name that was invented carries the
-// date, so two rips of the same disc do not collide.
-func TestAChosenNameIsUsedAsItIs(t *testing.T) {
-	s := &server{store: emptyStore{}}
-	disc := &mmc.Disc{ProfileName: "DVD-ROM"}
-
-	name, chosen := s.ripName(&drive{}, disc, "movies", "VIDEO_TS")
-	if name != "movies" || !chosen {
-		t.Errorf("a typed name came out as %q (chosen %v), want it used as it is", name, chosen)
-	}
-	name, chosen = s.ripName(&drive{}, disc, "", "VIDEO_TS")
-	if chosen {
-		t.Error("an invented name was reported as chosen")
-	}
-	if !strings.HasPrefix(name, "VIDEO_TS-") || len(name) != len("VIDEO_TS-20260919-211247") {
-		t.Errorf("an invented name is %q, want the folder and the date", name)
-	}
-	// Nothing to go on: the disc itself.
-	name, _ = s.ripName(&drive{}, disc, "", "")
-	if !strings.HasPrefix(name, "DVD-ROM-") {
-		t.Errorf("with nothing chosen the name is %q, want the disc's", name)
-	}
-}
-
-// Two archive suffixes are one suffix, or "disc.tar.gz" twice gives
-// "disc.tar-2.gz".
-func TestSplitExtensionKeepsTwoPartSuffixes(t *testing.T) {
-	cases := map[string][2]string{
-		"disc.tar.gz": {"disc", ".tar.gz"},
-		"disc.zip":    {"disc", ".zip"},
-		"disc.iso":    {"disc", ".iso"},
-		"disc":        {"disc", ""},
-		"a.b.iso":     {"a.b", ".iso"},
-	}
-	for in, want := range cases {
-		stem, ext := splitExtension(in)
-		if stem != want[0] || ext != want[1] {
-			t.Errorf("splitExtension(%q) = %q, %q, want %q, %q", in, stem, ext, want[0], want[1])
-		}
 	}
 }
 

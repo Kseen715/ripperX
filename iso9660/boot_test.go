@@ -30,17 +30,6 @@ const (
 	bootSize = 64 // sectors in the whole test volume
 )
 
-// peHeader is the smallest thing that answers "what does this run on":
-// the DOS stub's pointer, the PE signature, and the machine type.
-func peHeader(machine uint16) []byte {
-	b := make([]byte, 0x100)
-	b[0], b[1] = 'M', 'Z'
-	putLE32(b[0x3c:0x40], 0x80)
-	copy(b[0x80:], "PE\x00\x00")
-	b[0x84], b[0x85] = byte(machine), byte(machine>>8)
-	return b
-}
-
 type bootOpts struct {
 	// tree puts a bootloader of this name in the ISO 9660 tree at
 	// /EFI/BOOT, the way a Linux installer does.
@@ -52,6 +41,17 @@ type bootOpts struct {
 	// unbootable writes a catalogue whose entries are all marked not
 	// bootable.
 	unbootable bool
+}
+
+// peHeader is the smallest thing that answers "what does this run on":
+// the DOS stub's pointer, the PE signature, and the machine type.
+func peHeader(machine uint16) []byte {
+	b := make([]byte, 0x100)
+	b[0], b[1] = 'M', 'Z'
+	putLE32(b[0x3c:0x40], 0x80)
+	copy(b[0x80:], "PE\x00\x00")
+	b[0x84], b[0x85] = byte(machine), byte(machine>>8)
+	return b
 }
 
 func buildBootISO(t *testing.T, o bootOpts) []byte {

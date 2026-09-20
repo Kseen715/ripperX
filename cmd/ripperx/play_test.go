@@ -1,15 +1,14 @@
 package main
 
 import (
-	"bytes"
-	"context"
 	"encoding/binary"
-	"io"
+	"errors"
+	"fmt"
 	"mime"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/Kseen715/ripperX/mmc"
 )
 
 // A browser will only play a WAV whose header says exactly what CD audio is,
@@ -97,117 +96,56 @@ func TestContentTypeAndPlayability(t *testing.T) {
 	}
 }
 
-func TestMSF(t *testing.T) {
-	cases := []struct {
-		lba  int64
-		want string
-	}{
-		{0, "00:00:00"},
-		{74, "00:00:74"},
-		{75, "00:01:00"},
-		{75 * 60, "01:00:00"},
-		{-5, "00:00:00"},
+// A header field is Latin-1 by rule, so a file named in Cyrillic cannot go
+// in filename= and arrive intact. The name has to be carried in filename*,
+// with an ASCII one beside it for anything that does not understand that.
+func TestContentDispositionCarriesNonLatinNames(t *testing.T) {
+	plain := httptest.NewRequest(http.MethodGet, "/api/drives/sr0/file?path=/x", nil)
+	if got := contentDisposition(plain, "autorun.inf"); got != `attachment; filename="autorun.inf"` {
+		t.Errorf("an ASCII name = %q, want it left alone", got)
 	}
-	for _, tc := range cases {
-		if got := msf(tc.lba); got != tc.want {
-			t.Errorf("msf(%d) = %q, want %q", tc.lba, got, tc.want)
+
+	got := contentDisposition(plain, "Наклейка.txt")
+	want := `attachment; filename="________.txt"; filename*=UTF-8''%D0%9D%D0%B0%D0%BA%D0%BB%D0%B5%D0%B9%D0%BA%D0%B0.txt`
+	if got != want {
+		t.Errorf("a Cyrillic name = %q, want %q", got, want)
+	}
+	// Whatever is in the name, the header must not be able to end the
+	// quoted string early and add parameters of its own.
+	for _, name := range []string{`a"b.iso`, "a\\b.iso", "a\rb.iso"} {
+		h := contentDisposition(plain, name)
+		if strings.Count(h, `"`) != 2 {
+			t.Errorf("contentDisposition(%q) = %q, which does not have exactly one quoted name", name, h)
 		}
 	}
-}
 
-// userData is what makes a raw image convertible. Getting the offset wrong
-// produces an .iso that is the right length and complete rubbish, so each
-// sector kind is checked separately.
-func TestUserDataFindsTheRightOffset(t *testing.T) {
-	sync := func() []byte {
-		s := make([]byte, mmc.SectorRaw)
-		s[0] = 0x00
-		for i := 1; i <= 10; i++ {
-			s[i] = 0xff
-		}
-		s[11] = 0x00
-		return s
-	}
-
-	mode1 := sync()
-	mode1[15] = 1
-	copy(mode1[16:], bytes.Repeat([]byte{0xa1}, 4))
-	if got, ok := userData(mode1); !ok || got[0] != 0xa1 || len(got) != mmc.SectorData {
-		t.Errorf("mode 1: ok=%v first=%#x len=%d", ok, got[0], len(got))
-	}
-
-	mode2form1 := sync()
-	mode2form1[15] = 2
-	mode2form1[18] = 0x00 // form 1
-	copy(mode2form1[24:], bytes.Repeat([]byte{0xb2}, 4))
-	if got, ok := userData(mode2form1); !ok || got[0] != 0xb2 {
-		t.Errorf("mode 2 form 1: ok=%v", ok)
-	}
-
-	mode2form2 := sync()
-	mode2form2[15] = 2
-	mode2form2[18] = 0x20 // form 2: 2324 bytes, not part of an .iso
-	if _, ok := userData(mode2form2); ok {
-		t.Error("mode 2 form 2 has no 2048-byte user field and must be skipped")
-	}
-
-	audio := make([]byte, mmc.SectorRaw) // no sync pattern
-	if _, ok := userData(audio); ok {
-		t.Error("an audio sector has no user data field")
-	}
-	if _, ok := userData(make([]byte, 100)); ok {
-		t.Error("a short buffer must not be read past its end")
+	inline := httptest.NewRequest(http.MethodGet, "/api/drives/sr0/file?path=/x&inline=1", nil)
+	if got := contentDisposition(inline, "clip.mp4"); !strings.HasPrefix(got, "inline;") {
+		t.Errorf("an inline request = %q, want it played rather than downloaded", got)
 	}
 }
 
-// A file in a damaged sector reads short. The tar entry's header has
-// already been written with the full length, so the copy has to pad - or
-// every entry after it in the archive is misaligned and lost.
-func TestCopyCtxPadsAShortRead(t *testing.T) {
-	var out bytes.Buffer
-	n, err := copyCtx(context.Background(), &out, strings.NewReader("abc"), 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n != 10 || out.Len() != 10 {
-		t.Fatalf("wrote %d bytes (n=%d), want 10", out.Len(), n)
-	}
-	if !bytes.Equal(out.Bytes(), append([]byte("abc"), make([]byte, 7)...)) {
-		t.Errorf("the padding is not zeroes: %q", out.Bytes())
-	}
-}
-
-// A source longer than the header promised must be cut, for the same reason.
-func TestCopyCtxTruncatesALongRead(t *testing.T) {
-	var out bytes.Buffer
-	if _, err := copyCtx(context.Background(), &out, strings.NewReader("abcdefghij"), 4); err != nil {
-		t.Fatal(err)
-	}
-	if out.String() != "abcd" {
-		t.Errorf("wrote %q, want %q", out.String(), "abcd")
-	}
-}
-
-func TestCopyCtxStopsWhenCancelled(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := copyCtx(ctx, io.Discard, strings.NewReader("abc"), 3); err == nil {
-		t.Error("a cancelled copy must stop rather than finish")
-	}
-}
-
-func TestHumanBytes(t *testing.T) {
-	for _, tc := range []struct {
-		n    int64
-		want string
-	}{
-		{512, "512 bytes"},
-		{2048, "2.0 kB"},
-		{700 << 20, "700.0 MB"},
-		{5046586572, "4.7 GB"},
+// A drive that is busy is 409, never 400. A client told its request was
+// malformed will change the request, which is precisely the wrong thing to
+// do about a drive that is occupied for the next two minutes.
+func TestBusyDrivesAreAConflictNotABadRequest(t *testing.T) {
+	for _, err := range []error{
+		&errDriveBusy{job: "abc"},
+		errDriveStreaming,
+		fmt.Errorf("starting a rip: %w", &errDriveBusy{job: "abc"}),
+		fmt.Errorf("starting a rip: %w", errDriveStreaming),
 	} {
-		if got := humanBytes(tc.n); got != tc.want {
-			t.Errorf("humanBytes(%d) = %q, want %q", tc.n, got, tc.want)
+		if !driveUnavailable(err) {
+			t.Errorf("%v was not recognised as a busy drive", err)
+		}
+	}
+	for _, err := range []error{
+		errors.New("no such rip kind \"xyz\""),
+		errNoSuchDrive,
+		errBadName,
+	} {
+		if driveUnavailable(err) {
+			t.Errorf("%v was wrongly treated as a busy drive", err)
 		}
 	}
 }

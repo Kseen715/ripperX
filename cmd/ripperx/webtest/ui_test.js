@@ -10,12 +10,15 @@
 // that shows up in a screenshot, and all of it shows up here: the test marks
 // nodes, pushes twenty snapshots, and looks for its marks.
 //
-//     npm install jsdom && node cmd/ripperx/web/ui_test.js
+//     npm install jsdom && node cmd/ripperx/webtest/ui_test.js
 const fs = require('fs');
 const path = require('path');
 const { JSDOM, VirtualConsole } = require('jsdom');
 
-const web = __dirname;
+// The page itself, which is a sibling of this directory rather than its
+// parent: //go:embed web ships whatever is under web/, and a test in there
+// is a test inside the binary.
+const web = path.join(__dirname, '..', 'web');
 const html = fs.readFileSync(path.join(web, 'index.html'), 'utf8')
   .replace('<script src="i18n.js"></script>', '')
   .replace('<script src="app.js"></script>', '');

@@ -19,6 +19,45 @@ func testHistory(t *testing.T) *history {
 	return h
 }
 
+func saveTestScan(t *testing.T, h *history, id, disc string, at time.Time, c2, unreadable int64) {
+	t.Helper()
+	saveTestScanMeasured(t, h, id, disc, at, c2, unreadable, true)
+}
+
+func saveTestScanMeasured(t *testing.T, h *history, id, disc string, at time.Time, c2, unreadable int64, measured bool) {
+	t.Helper()
+	j := Job{ID: id, Kind: "scan", Drive: "sr0", Label: "check", State: jobDone, Started: at, Finished: at}
+	res := &ScanResult{
+		Sectors: 300000, C2Supported: measured, C2Sectors: c2, Unreadable: unreadable,
+		Map: make([]int, mapBuckets),
+	}
+	gradeDisc(res)
+	if err := h.saveScan(j, disc, "TEST DISC", &mmc.Disc{ProfileName: "CD-ROM"}, res); err != nil {
+		t.Fatal(err)
+	}
+	// saveScan stamps scanned_at with the wall clock, so the ordering is
+	// fixed up here to make a trend testable without waiting a year.
+	if _, err := h.db.Exec("UPDATE scans SET scanned_at=? WHERE job_id=?", millis(at), id); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func containsAll(s string, parts ...string) bool {
+	for _, p := range parts {
+		found := false
+		for i := 0; i+len(p) <= len(s); i++ {
+			if s[i:i+len(p)] == p {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
 // The whole point of the database is that a restart does not lose what was
 // learned, so the round trip is what has to be proved.
 func TestJobsSurviveARoundTrip(t *testing.T) {
@@ -54,29 +93,6 @@ func TestJobsSurviveARoundTrip(t *testing.T) {
 	}
 	if got[0].Started.IsZero() || got[0].Finished.IsZero() {
 		t.Errorf("the times did not survive: %+v", got[0])
-	}
-}
-
-func saveTestScan(t *testing.T, h *history, id, disc string, at time.Time, c2, unreadable int64) {
-	t.Helper()
-	saveTestScanMeasured(t, h, id, disc, at, c2, unreadable, true)
-}
-
-func saveTestScanMeasured(t *testing.T, h *history, id, disc string, at time.Time, c2, unreadable int64, measured bool) {
-	t.Helper()
-	j := Job{ID: id, Kind: "scan", Drive: "sr0", Label: "check", State: jobDone, Started: at, Finished: at}
-	res := &ScanResult{
-		Sectors: 300000, C2Supported: measured, C2Sectors: c2, Unreadable: unreadable,
-		Map: make([]int, mapBuckets),
-	}
-	gradeDisc(res)
-	if err := h.saveScan(j, disc, "TEST DISC", &mmc.Disc{ProfileName: "CD-ROM"}, res); err != nil {
-		t.Fatal(err)
-	}
-	// saveScan stamps scanned_at with the wall clock, so the ordering is
-	// fixed up here to make a trend testable without waiting a year.
-	if _, err := h.db.Exec("UPDATE scans SET scanned_at=? WHERE job_id=?", millis(at), id); err != nil {
-		t.Fatal(err)
 	}
 }
 
@@ -184,40 +200,6 @@ func TestNilHistoryIsHarmless(t *testing.T) {
 	}
 }
 
-func TestRoughly(t *testing.T) {
-	cases := []struct {
-		d    time.Duration
-		want string
-	}{
-		{30 * time.Minute, "30 minutes"},
-		{5 * time.Hour, "5 hours"},
-		{10 * 24 * time.Hour, "10 days"},
-		{100 * 24 * time.Hour, "3 months"},
-		{800 * 24 * time.Hour, "2 years"},
-	}
-	for _, tc := range cases {
-		if got := roughly(tc.d); got != tc.want {
-			t.Errorf("roughly(%v) = %q, want %q", tc.d, got, tc.want)
-		}
-	}
-}
-
-func containsAll(s string, parts ...string) bool {
-	for _, p := range parts {
-		found := false
-		for i := 0; i+len(p) <= len(s); i++ {
-			if s[i:i+len(p)] == p {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false
-		}
-	}
-	return true
-}
-
 // A DVD's error rate cannot be measured at all, so two clean scans of one
 // say nothing about whether it is decaying. Reporting "still not one
 // uncorrected byte" would be claiming a measurement that was never made -
@@ -246,5 +228,23 @@ func TestUnmeasurableDiscsDoNotClaimACleanBillOfHealth(t *testing.T) {
 	discs, _ = h2.discs("", false)
 	if !strings.Contains(discs[0].TrendNote, "uncorrected byte") {
 		t.Errorf("a measured disc lost its plain answer: %q", discs[0].TrendNote)
+	}
+}
+
+func TestRoughly(t *testing.T) {
+	cases := []struct {
+		d    time.Duration
+		want string
+	}{
+		{30 * time.Minute, "30 minutes"},
+		{5 * time.Hour, "5 hours"},
+		{10 * 24 * time.Hour, "10 days"},
+		{100 * 24 * time.Hour, "3 months"},
+		{800 * 24 * time.Hour, "2 years"},
+	}
+	for _, tc := range cases {
+		if got := roughly(tc.d); got != tc.want {
+			t.Errorf("roughly(%v) = %q, want %q", tc.d, got, tc.want)
+		}
 	}
 }

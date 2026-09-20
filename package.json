@@ -3,7 +3,7 @@
   "private": true,
   "description": "Only the page's test. ripperX itself has no JavaScript dependencies: app.js is plain script, and this is here so the DOM can be driven without a browser.",
   "scripts": {
-    "test": "node cmd/ripperx/web/ui_test.js"
+    "test": "node cmd/ripperx/webtest/ui_test.js"
   },
   "devDependencies": {
     "jsdom": "^27.0.0"

@@ -50,6 +50,28 @@ func build(t *testing.T, items []Item, content map[string]string, opt Options) b
 	return built{fs: fs, image: buf.Bytes()}
 }
 
+// Two names that flatten to the same 8.3 identifier must not become one
+// file. Silently writing one over the other is the one outcome that loses
+// data without saying so.
+// openPrimary reads the image's primary tree rather than its Joliet one,
+// which is where Rock Ridge lives. Open picks Joliet when a volume has both.
+func openPrimary(t *testing.T, image []byte) *FS {
+	t.Helper()
+	r := bytes.NewReader(image)
+	pvd := make([]byte, BlockSize)
+	if _, err := r.ReadAt(pvd, systemArea*BlockSize); err != nil {
+		t.Fatalf("reading the primary descriptor: %v", err)
+	}
+	if pvd[0] != 1 || string(pvd[1:6]) != "CD001" {
+		t.Fatalf("sector %d is not a primary volume descriptor", systemArea)
+	}
+	d := parseDescriptor(pvd)
+	fs := &FS{r: r, vol: d.volume(), root: d.root}
+	fs.vol.Format = "ISO 9660"
+	fs.vol.RockRidge = fs.detectRockRidge()
+	return fs
+}
+
 func TestWrittenImageReadsBack(t *testing.T) {
 	when := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
 	items := []Item{
@@ -138,28 +160,6 @@ func TestWrittenImageReadsBack(t *testing.T) {
 	if !e.ModTime.Equal(when) {
 		t.Errorf("the timestamp came back as %s, want %s", e.ModTime, when)
 	}
-}
-
-// Two names that flatten to the same 8.3 identifier must not become one
-// file. Silently writing one over the other is the one outcome that loses
-// data without saying so.
-// openPrimary reads the image's primary tree rather than its Joliet one,
-// which is where Rock Ridge lives. Open picks Joliet when a volume has both.
-func openPrimary(t *testing.T, image []byte) *FS {
-	t.Helper()
-	r := bytes.NewReader(image)
-	pvd := make([]byte, BlockSize)
-	if _, err := r.ReadAt(pvd, systemArea*BlockSize); err != nil {
-		t.Fatalf("reading the primary descriptor: %v", err)
-	}
-	if pvd[0] != 1 || string(pvd[1:6]) != "CD001" {
-		t.Fatalf("sector %d is not a primary volume descriptor", systemArea)
-	}
-	d := parseDescriptor(pvd)
-	fs := &FS{r: r, vol: d.volume(), root: d.root}
-	fs.vol.Format = "ISO 9660"
-	fs.vol.RockRidge = fs.detectRockRidge()
-	return fs
 }
 
 func TestClashingNamesStayTwoFiles(t *testing.T) {
