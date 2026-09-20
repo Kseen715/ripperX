@@ -272,6 +272,8 @@
   "files.takeTickedTitle": "Take what is ticked",
   "files.takeTickedWhat.one": "1 selected item, wrapped in one archive.",
   "files.takeTickedWhat.other": "{n} selected items, wrapped in one archive.",
+  "files.quality": "Quality",
+  "files.qualityOriginal": "{size} — as on the disc",
   "files.converting": "converted as you watch, because no browser plays this format; seeking re-reads the disc.",
   "files.cannotPlay": "This browser cannot play this file.",
   "files.convertFailed": "This file could not be converted for the browser.",

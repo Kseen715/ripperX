@@ -426,6 +426,21 @@ length of the film; an episode disc has eighteen. Pressing Play on a VOB in
 the file browser leads to that list rather than to a player, because a file
 holding three titles is not a thing that can be played.
 
+**Sizes.** The playlist names one size per line - 144p, 240p, 360p, 480p and
+the disc's own, whatever that is - and the player offers them in a menu.
+Nothing is ever scaled up, so a PAL DVD stops at its own 576 lines and a
+smaller file stops sooner. The choice costs nothing on the server, because
+the disc has to be read either way; what it buys is the link to the browser,
+where a DVD at its own size runs to eleven megabits a second and 240p runs
+to under one.
+
+Automatic switching is deliberately off. It is right on a CDN, where every
+size already exists, and wrong here, where each one is made to order from
+one drive: a player deciding halfway through that the link looks slow would
+have the same minute of film read and encoded a second time, and the drive
+is the one thing that cannot be in two places at once. So the size is the
+viewer's choice, and it is remembered in their browser.
+
 Two corrections are made to the picture on the way. DVD video is usually
 interlaced, so frames that say they are get deinterlaced; and it is
 anamorphic - 720x576 shown as 16:9 - so it is scaled to square pixels here

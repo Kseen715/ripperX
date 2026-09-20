@@ -644,6 +644,7 @@ func (s *server) handleTray(w http.ResponseWriter, r *http.Request) {
 // between a scrub bar and another trip across the disc.
 type mediaCache struct {
 	mu        sync.Mutex
+	formats   map[string]sourceFormat
 	durations map[string]float64
 	segments  map[string][]byte
 	order     []string
@@ -673,11 +674,27 @@ const mediaCacheLimit = 64 << 20
 
 func newMediaCache() *mediaCache {
 	return &mediaCache{
+		formats:   map[string]sourceFormat{},
 		durations: map[string]float64{},
 		segments:  map[string][]byte{},
 		inflight:  map[string]*segmentJob{},
 		limit:     mediaCacheLimit,
 	}
+}
+
+// format is what the picture in a source looks like, which costs a probe of
+// the disc to find out and never changes while it is in the drive.
+func (m *mediaCache) format(source string) (sourceFormat, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	f, ok := m.formats[source]
+	return f, ok
+}
+
+func (m *mediaCache) setFormat(source string, f sourceFormat) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.formats[source] = f
 }
 
 func (m *mediaCache) duration(path string) (float64, bool) {
@@ -752,6 +769,7 @@ func (m *mediaCache) finishSegment(key string, seg []byte, err error) {
 func (m *mediaCache) clear() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.formats = map[string]sourceFormat{}
 	m.durations = map[string]float64{}
 	m.segments = map[string][]byte{}
 	m.order = nil

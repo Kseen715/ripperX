@@ -88,37 +88,78 @@ func findTranscoder(explicit string) *transcoder {
 	return &transcoder{ffmpeg: ffmpeg, ffprobe: probe}
 }
 
-// probeDuration asks how long the film is. It is asked of the same URL the
-// encoder will read, so the answer covers the whole title rather than the
-// first of its parts.
-//
-// A program stream does not record its length, so ffprobe works it out from
-// the timestamps at both ends - which needs a seek to the end of the disc
-// and is why the answer is remembered.
-func (t *transcoder) probeDuration(ctx context.Context, src string) (float64, error) {
+// sourceFormat is what the picture is before anything is done to it: the
+// size it is stored at, the shape it is meant to be shown in, and - where
+// the file will say - how long it lasts.
+type sourceFormat struct {
+	width    int
+	height   int
+	sarNum   int
+	sarDen   int
+	duration float64
+}
+
+// displayWidth is how wide the picture is meant to be shown. A DVD stores
+// 720 columns and means 768 or 1024 of them, which is why the ladder is
+// worked out from this rather than from the stored width.
+func (f sourceFormat) displayWidth() int {
+	if f.sarNum <= 0 || f.sarDen <= 0 {
+		return f.width
+	}
+	return int(math.Round(float64(f.width) * float64(f.sarNum) / float64(f.sarDen)))
+}
+
+func (f sourceFormat) ok() bool { return f.width > 0 && f.height > 0 }
+
+// probeFormat asks ffprobe what is in the file. It is asked of the same URL
+// the encoder will read, so the answer is about the whole title rather than
+// the first of its parts, and it is remembered for as long as the disc is
+// in the drive: a program stream records no length, so working one out
+// means seeking to the end of the disc.
+func (t *transcoder) probeFormat(ctx context.Context, src string) (sourceFormat, error) {
 	cmd := exec.CommandContext(ctx, t.ffprobe,
 		"-v", "error",
-		"-show_entries", "format=duration,bit_rate",
+		"-select_streams", "v:0",
+		"-show_entries", "stream=width,height,sample_aspect_ratio",
+		"-show_entries", "format=duration",
 		"-of", "default=noprint_wrappers=1",
 		src)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return 0, fmt.Errorf("ffprobe could not read this file: %s",
+		return sourceFormat{}, fmt.Errorf("ffprobe could not read this file: %s",
 			firstLine(stderr.String(), err.Error()))
 	}
+	f := sourceFormat{sarNum: 1, sarDen: 1}
 	for _, line := range strings.Split(string(out), "\n") {
 		key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
-		if !ok || key != "duration" {
+		if !ok {
 			continue
 		}
-		d, err := strconv.ParseFloat(value, 64)
-		if err == nil && d > 0 {
-			return d, nil
+		switch key {
+		case "width":
+			f.width, _ = strconv.Atoi(value)
+		case "height":
+			f.height, _ = strconv.Atoi(value)
+		case "sample_aspect_ratio":
+			if num, den, ok := strings.Cut(value, ":"); ok {
+				n, errN := strconv.Atoi(num)
+				d, errD := strconv.Atoi(den)
+				if errN == nil && errD == nil && n > 0 && d > 0 {
+					f.sarNum, f.sarDen = n, d
+				}
+			}
+		case "duration":
+			if d, err := strconv.ParseFloat(value, 64); err == nil && d > 0 {
+				f.duration = d
+			}
 		}
 	}
-	return 0, errors.New("this file does not say how long it is")
+	if !f.ok() {
+		return sourceFormat{}, errors.New("this file has no picture in it this server can read")
+	}
+	return f, nil
 }
 
 // firstLine is the one line of ffmpeg's complaint worth repeating.
@@ -129,6 +170,21 @@ func firstLine(s, fallback string) string {
 		}
 	}
 	return fallback
+}
+
+// hlsMaster is the list of sizes this can be watched at. Every rung points
+// at a playlist of its own, and the player switches between them without
+// starting again.
+func hlsMaster(rungs []rung, f sourceFormat, levelURL func(r rung) string) string {
+	var b strings.Builder
+	b.WriteString("#EXTM3U\n")
+	b.WriteString("#EXT-X-VERSION:3\n")
+	for _, r := range rungs {
+		fmt.Fprintf(&b, "#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%dx%d,NAME=%q,CODECS=\"avc1.640029,mp4a.40.2\"\n",
+			r.bandwidth, r.width(f), r.height, fmt.Sprintf("%dp", r.height))
+		fmt.Fprintf(&b, "%s\n", levelURL(r))
+	}
+	return b.String()
 }
 
 // hlsPlaylist is the whole film as a list of segments. It is a VOD
@@ -158,6 +214,70 @@ func hlsPlaylist(duration, segLen float64, segURL func(n int) string) string {
 	return b.String()
 }
 
+// A disc is read once whatever size it is watched at, so the ladder here
+// buys nothing on this machine: what it buys is the link to the browser. A
+// DVD at its own size runs to eleven megabits a second, which is fine on a
+// cable and hopeless over a phone, and the difference between watching and
+// not watching is a rung further down.
+//
+// The rungs are the usual heights so the menu reads the way every other
+// player's does. Nothing is ever scaled up: only the rungs below the disc's
+// own height are offered, with the disc's own size above them.
+type rung struct {
+	height    int
+	crf       int
+	maxrate   string
+	bandwidth int // what to tell the player to expect, in bits a second
+}
+
+var ladder = []rung{
+	{height: 144, crf: 30, maxrate: "400k", bandwidth: 450_000},
+	{height: 240, crf: 29, maxrate: "700k", bandwidth: 800_000},
+	{height: 360, crf: 28, maxrate: "1200k", bandwidth: 1_400_000},
+	{height: 480, crf: 26, maxrate: "2500k", bandwidth: 2_800_000},
+	{height: 720, crf: 24, maxrate: "5000k", bandwidth: 5_500_000},
+	{height: 1080, crf: 23, maxrate: "8000k", bandwidth: 9_000_000},
+}
+
+// originalRung is the disc's own size, left alone: no scaling, no ceiling on
+// the bitrate, which is what somebody on the same network wants.
+func originalRung(height int) rung {
+	return rung{height: height, crf: 23, bandwidth: 12_000_000}
+}
+
+// rungsFor is the ladder this source offers, smallest first, with the
+// source's own size last - which is where hls.js puts the best level and
+// where the menu therefore starts.
+func rungsFor(f sourceFormat) []rung {
+	var out []rung
+	for _, r := range ladder {
+		// A rung within a hair of the source's own height is the source's
+		// own height with extra steps.
+		if r.height < f.height-16 {
+			out = append(out, r)
+		}
+	}
+	return append(out, originalRung(f.height))
+}
+
+// rungByHeight finds the rung a request asks for, so that a segment is
+// encoded the same way its playlist promised.
+func rungByHeight(f sourceFormat, height int) (rung, error) {
+	for _, r := range rungsFor(f) {
+		if r.height == height {
+			return r, nil
+		}
+	}
+	return rung{}, fmt.Errorf("this file is not offered at %dp", height)
+}
+
+// width is how wide this rung is on screen, kept even because an encoder
+// will not take an odd one.
+func (r rung) width(f sourceFormat) int {
+	w := int(math.Round(float64(f.displayWidth()) * float64(r.height) / float64(f.height)))
+	return w &^ 1
+}
+
 // segmentArgs is the command line for one segment.
 //
 // Each segment is encoded on its own, so it has to start with a keyframe
@@ -169,30 +289,47 @@ func hlsPlaylist(duration, segLen float64, segURL func(n int) string) string {
 // And it is anamorphic - 720x576 shown as 16:9 - so it is scaled to square
 // pixels here rather than left to a browser that may or may not read the
 // aspect ratio out of a transport stream.
-func segmentArgs(src string, n int, segLen float64) []string {
+func segmentArgs(src string, n int, segLen float64, r rung, f sourceFormat) []string {
 	start := float64(n) * segLen
-	return []string{
+	// Square pixels first, because the disc's are not; then, for every rung
+	// but the disc's own size, down to the height that was asked for.
+	filters := "yadif=deint=interlaced,scale=iw*sar:ih,setsar=1"
+	if r.height < f.height {
+		filters += fmt.Sprintf(",scale=%d:%d:flags=bicubic", r.width(f), r.height)
+	}
+	args := []string{
 		"-nostdin", "-hide_banner", "-loglevel", "error",
 		"-ss", strconv.FormatFloat(start, 'f', 3, 64),
 		"-i", src,
 		"-t", strconv.FormatFloat(segLen, 'f', 3, 64),
 		"-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn",
-		"-vf", "yadif=deint=interlaced,scale=iw*sar:ih,setsar=1",
-		"-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+		"-vf", filters,
+		"-c:v", "libx264", "-preset", "veryfast", "-crf", strconv.Itoa(r.crf),
 		"-pix_fmt", "yuv420p",
 		"-force_key_frames", "expr:gte(t,n_forced*" + strconv.FormatFloat(segLen, 'f', 3, 64) + ")",
-		"-c:a", "aac", "-b:a", "160k", "-ac", "2",
+	}
+	if r.maxrate != "" {
+		// A ceiling as well as a quality target: a rung chosen because the
+		// link is thin must not blow through it on a busy scene.
+		args = append(args, "-maxrate", r.maxrate, "-bufsize", r.maxrate)
+	}
+	audio := "160k"
+	if r.height <= 360 {
+		audio = "96k"
+	}
+	return append(args,
+		"-c:a", "aac", "-b:a", audio, "-ac", "2",
 		"-output_ts_offset", strconv.FormatFloat(start, 'f', 3, 64),
 		"-muxdelay", "0", "-muxpreload", "0",
 		"-f", "mpegts", "pipe:1",
-	}
+	)
 }
 
 // segment encodes one piece and hands back its bytes.
-func (t *transcoder) segment(ctx context.Context, src string, n int) ([]byte, error) {
+func (t *transcoder) segment(ctx context.Context, src string, n int, r rung, f sourceFormat) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, segmentTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, t.ffmpeg, segmentArgs(src, n, segmentSeconds)...)
+	cmd := exec.CommandContext(ctx, t.ffmpeg, segmentArgs(src, n, segmentSeconds, r, f)...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -415,36 +552,40 @@ func (s *server) openSource(d *drive, m mediaSource) (discfs.File, discfs.Entry,
 	return nil, discfs.Entry{}, fmt.Errorf("this disc has no title %d", m.title)
 }
 
-// sourceDuration is how long the thing being played lasts.
+// sourceFormatFor is what is being played: its size, its shape, and how
+// long it lasts.
 //
-// A DVD title needs no probing: the disc records its length, and that is
-// the only figure that is right on a disc whose files hold several titles
-// one after another. Anything else is asked of ffprobe once and remembered.
-func (s *server) sourceDuration(ctx context.Context, d *drive, m mediaSource, src string) (float64, error) {
+// The length of a DVD title comes from the disc rather than from ffprobe.
+// The disc's files hold several titles one after another, each with its own
+// timeline starting at zero, so the only figure ffprobe can give is the
+// length of whichever timeline it saw last - eighteen seconds for a
+// two-hour disc. The size still has to be asked of the picture itself.
+func (s *server) sourceFormatFor(ctx context.Context, d *drive, m mediaSource, src string) (sourceFormat, error) {
+	f, ok := d.media.format(m.key())
+	if !ok {
+		probed, err := s.ffmpeg.probeFormat(ctx, src)
+		if err != nil {
+			return sourceFormat{}, err
+		}
+		f = probed
+		d.media.setFormat(m.key(), f)
+	}
 	if m.title > 0 {
 		disc, err := d.dvd()
 		if err != nil {
-			return 0, err
+			return sourceFormat{}, err
 		}
+		f.duration = 0
 		for _, t := range disc.Titles {
 			if t.Number == m.title {
-				if t.Seconds <= 0 {
-					return 0, errors.New("this disc does not say how long this title is")
-				}
-				return t.Seconds, nil
+				f.duration = t.Seconds
 			}
 		}
-		return 0, fmt.Errorf("this disc has no title %d", m.title)
 	}
-	if d, ok := d.media.duration(m.key()); ok {
-		return d, nil
+	if f.duration <= 0 {
+		return sourceFormat{}, errors.New("this does not say how long it is")
 	}
-	seconds, err := s.ffmpeg.probeDuration(ctx, src)
-	if err != nil {
-		return 0, err
-	}
-	d.media.setDuration(m.key(), seconds)
-	return seconds, nil
+	return f, nil
 }
 
 // transcodable says a file is worth offering a play button for even though
@@ -462,32 +603,82 @@ func (s *server) transcodable(name string) bool {
 // and what to ask for. Producing it costs one probe of the disc, which is
 // remembered until the disc changes.
 func (s *server) handleHLSPlaylist(w http.ResponseWriter, r *http.Request) {
-	d, m, err := s.transcodeTarget(w, r)
+	_, m, f, err := s.transcodeSource(w, r)
 	if err != nil {
 		return
+	}
+	query := m.query()
+	body := hlsMaster(rungsFor(f), f, func(rg rung) string {
+		return fmt.Sprintf("level.m3u8?%s&height=%d", query, rg.height)
+	})
+	writePlaylist(w, body)
+}
+
+// handleHLSLevel is one size's list of segments. Every rung has the same
+// segments at the same times - only the picture in them differs - so a
+// player changing size keeps its place.
+func (s *server) handleHLSLevel(w http.ResponseWriter, r *http.Request) {
+	_, m, f, err := s.transcodeSource(w, r)
+	if err != nil {
+		return
+	}
+	rg, err := s.rungParam(w, r, f)
+	if err != nil {
+		return
+	}
+	query := m.query()
+	body := hlsPlaylist(f.duration, segmentSeconds, func(n int) string {
+		return fmt.Sprintf("%d.ts?%s&height=%d", n, query, rg.height)
+	})
+	writePlaylist(w, body)
+}
+
+func writePlaylist(w http.ResponseWriter, body string) {
+	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write([]byte(body))
+}
+
+// rungParam is the size a request asks for, refused if it is not one this
+// source is offered at - a segment must be the size its playlist promised.
+func (s *server) rungParam(w http.ResponseWriter, r *http.Request, f sourceFormat) (rung, error) {
+	height, err := strconv.Atoi(r.URL.Query().Get("height"))
+	if err != nil {
+		err = errors.New("no size was given")
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return rung{}, err
+	}
+	rg, err := rungByHeight(f, height)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: err.Error()})
+		return rung{}, err
+	}
+	return rg, nil
+}
+
+// transcodeSource is the checking both playlists do, and what they both
+// need: a drive, an encoder, something to play, and what that something
+// looks like.
+func (s *server) transcodeSource(w http.ResponseWriter, r *http.Request) (*drive, mediaSource, sourceFormat, error) {
+	d, m, err := s.transcodeTarget(w, r)
+	if err != nil {
+		return nil, m, sourceFormat{}, err
 	}
 	src, err := s.sourceURL(d, m)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
-		return
+		return nil, m, sourceFormat{}, err
 	}
-	duration, err := s.sourceDuration(r.Context(), d, m, src)
+	f, err := s.sourceFormatFor(r.Context(), d, m, src)
 	if err != nil {
 		if driveUnavailable(err) {
 			writeJSON(w, http.StatusConflict, errorResponse{Error: err.Error()})
-			return
+			return nil, m, sourceFormat{}, err
 		}
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
-		return
+		return nil, m, sourceFormat{}, err
 	}
-
-	query := m.query()
-	body := hlsPlaylist(duration, segmentSeconds, func(n int) string {
-		return fmt.Sprintf("%d.ts?%s", n, query)
-	})
-	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
-	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write([]byte(body))
+	return d, m, f, nil
 }
 
 // handleHLSSegment encodes one piece of the film, or hands back the one it
@@ -502,7 +693,21 @@ func (s *server) handleHLSSegment(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "that is not a segment number"})
 		return
 	}
-	seg, err := s.segmentFor(r.Context(), d, m, n)
+	src, err := s.sourceURL(d, m)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	f, err := s.sourceFormatFor(r.Context(), d, m, src)
+	if err != nil {
+		writeBusy(w, err)
+		return
+	}
+	rg, err := s.rungParam(w, r, f)
+	if err != nil {
+		return
+	}
+	seg, err := s.segmentFor(r.Context(), d, m, n, rg, f)
 	if err != nil {
 		if r.Context().Err() != nil {
 			// The player moved on - it seeked, or the page was closed.
@@ -524,18 +729,21 @@ func (s *server) handleHLSSegment(w http.ResponseWriter, r *http.Request) {
 // detached from the request that started it - it runs to the end, into the
 // cache, whether or not anybody is still listening - and a second request
 // for the same segment waits for the first rather than starting a rival.
-func (s *server) segmentFor(ctx context.Context, d *drive, m mediaSource, n int) ([]byte, error) {
-	if seg, ok := d.media.segment(m.key(), n); ok {
+func (s *server) segmentFor(ctx context.Context, d *drive, m mediaSource, n int, rg rung, f sourceFormat) ([]byte, error) {
+	// Every size has its own segments, so changing size does not hand the
+	// player the picture it was trying to get away from.
+	source := m.key() + "@" + strconv.Itoa(rg.height)
+	if seg, ok := d.media.segment(source, n); ok {
 		return seg, nil
 	}
 	src, err := s.sourceURL(d, m)
 	if err != nil {
 		return nil, err
 	}
-	key := segmentKey(m.key(), n)
+	key := segmentKey(source, n)
 	job, mine := d.media.beginSegment(key)
 	if mine {
-		go s.encodeSegment(d, m, n, src, key, job)
+		go s.encodeSegment(d, source, n, src, key, job, rg, f)
 	}
 	select {
 	case <-job.done:
@@ -545,7 +753,7 @@ func (s *server) segmentFor(ctx context.Context, d *drive, m mediaSource, n int)
 	}
 }
 
-func (s *server) encodeSegment(d *drive, m mediaSource, n int, src, key string, job *segmentJob) {
+func (s *server) encodeSegment(d *drive, source string, n int, src, key string, job *segmentJob, rg rung, f sourceFormat) {
 	ctx, cancel := context.WithTimeout(context.Background(), segmentTimeout)
 	defer cancel()
 	// One encoder per drive, and a queue for the rest: a disc read in two
@@ -556,10 +764,10 @@ func (s *server) encodeSegment(d *drive, m mediaSource, n int, src, key string, 
 		d.media.finishSegment(key, nil, ctx.Err())
 		return
 	}
-	seg, err := s.ffmpeg.segment(ctx, src, n)
+	seg, err := s.ffmpeg.segment(ctx, src, n, rg, f)
 	<-d.transcodes
 	if err == nil {
-		d.media.setSegment(m.key(), n, seg)
+		d.media.setSegment(source, n, seg)
 	}
 	d.media.finishSegment(key, seg, err)
 }

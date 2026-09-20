@@ -1696,6 +1696,10 @@ function startConverted(row, media, note, id, e) {
       testBandwidth: false,
     });
     row.hlsPlayer = hls;
+    // The sizes come from the playlist rather than from the page, because
+    // what can be offered depends on the disc: nothing is ever scaled up,
+    // so a DVD stops at its own 576 and a small file stops sooner.
+    hls.on(Hls.Events.MANIFEST_PARSED, () => buildQualityMenu(note.parentNode, hls));
     hls.on(Hls.Events.ERROR, (_evt, data) => {
       if (!data || !data.fatal) return;
       hls.destroy();
@@ -1717,6 +1721,71 @@ function playNativeHLS(media, note, src) {
   }
   media.src = src;
   media.play().catch(() => { /* the browser would rather the user pressed play */ });
+}
+
+// buildQualityMenu is the size picker in the player.
+//
+// The choice is the viewer's and stays the viewer's: automatic switching is
+// off. It would be wrong here in a way it is not on a CDN, because every
+// size is made to order from one drive - a player deciding halfway through
+// that the link looks slow would have the same minute of film read and
+// encoded a second time, and the drive is the one thing that cannot be in
+// two places at once.
+function buildQualityMenu(cell, hls) {
+  const levels = hls.levels || [];
+  if (levels.length < 2) return;
+
+  const row = document.createElement('div');
+  row.className = 'row';
+  row.style.cssText = 'margin-top:6px;gap:6px;align-items:center';
+  const label = text('label', t('files.quality'), 'muted');
+  label.style.fontSize = '11px';
+  label.htmlFor = 'quality-' + Math.random().toString(36).slice(2, 8);
+
+  const pick = document.createElement('select');
+  pick.id = label.htmlFor;
+  levels.forEach((level, i) => {
+    const option = document.createElement('option');
+    option.value = String(i);
+    // hls.js orders levels smallest first, so the last one is the disc's
+    // own size - the only one nothing has been done to.
+    option.textContent = i === levels.length - 1
+      ? t('files.qualityOriginal', { size: `${level.height}p` })
+      : `${level.height}p`;
+    pick.appendChild(option);
+  });
+
+  let chosen = levels.findIndex((level) => level.height === rememberedQuality());
+  if (chosen < 0) chosen = levels.length - 1;
+  pick.value = String(chosen);
+  // Setting the level is also what turns automatic switching off.
+  hls.currentLevel = chosen;
+  pick.addEventListener('change', () => {
+    const n = Number(pick.value);
+    hls.currentLevel = n;
+    rememberQuality(levels[n].height);
+  });
+
+  row.appendChild(label);
+  row.appendChild(pick);
+  cell.appendChild(row);
+}
+
+// The size somebody picked last time. It is a convenience rather than a
+// setting: it lives in this browser, and a disc that cannot be watched at
+// that size simply starts at its own.
+function rememberedQuality() {
+  try {
+    return Number(window.localStorage.getItem('ripperx.quality')) || 0;
+  } catch (e) {
+    return 0;
+  }
+}
+
+function rememberQuality(height) {
+  try {
+    window.localStorage.setItem('ripperx.quality', String(height));
+  } catch (e) { /* a browser that keeps nothing still plays films */ }
 }
 
 // playerFailed says why nothing is happening. A silent player that never

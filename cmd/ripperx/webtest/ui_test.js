@@ -391,9 +391,19 @@ const settle = () => new Promise((r) => setTimeout(r, 30));
   let hlsDestroyed = 0;
   window.Hls = class {
     static isSupported() { return true; }
-    static Events = { ERROR: 'hlsError' };
-    on() {}
-    loadSource(src) { hlsSources.push(src); }
+    static Events = { ERROR: 'hlsError', MANIFEST_PARSED: 'hlsManifestParsed' };
+    constructor() {
+      // What the server offers for a PAL DVD: its own size, and the usual
+      // rungs below it. hls.js orders them smallest first.
+      this.levels = [144, 240, 360, 480, 576].map((h) => ({ height: h, width: Math.round(h * 4 / 3) }));
+      this.currentLevel = -1;
+      this.handlers = {};
+    }
+    on(ev, fn) { (this.handlers[ev] ||= []).push(fn); }
+    loadSource(src) {
+      hlsSources.push(src);
+      for (const fn of this.handlers[window.Hls.Events.MANIFEST_PARSED] || []) fn();
+    }
     attachMedia() {}
     destroy() { hlsDestroyed++; }
   };
@@ -437,6 +447,25 @@ const settle = () => new Promise((r) => setTimeout(r, 30));
     hlsSources.join(', '));
   check('and has no direct source to sit on for ever',
     !vobPlayer.querySelector('video').getAttribute('src'));
+
+  // The size picker: every rung the playlist offered, the disc's own size
+  // chosen to begin with, and picking another switching the level rather
+  // than reloading the film.
+  const pick = vobPlayer.querySelector('select');
+  check('the player offers the sizes the disc can be watched at', !!pick &&
+    Array.from(pick.options).map((o) => o.textContent).join(',') ===
+      '144p,240p,360p,480p,576p — as on the disc',
+    pick ? Array.from(pick.options).map((o) => o.textContent).join(',') : 'no picker');
+  check('and starts at the disc\'s own size',
+    vobPlayer.hlsPlayer.currentLevel === 4, String(vobPlayer.hlsPlayer.currentLevel));
+  pick.value = '2';
+  pick.dispatchEvent(new window.Event('change'));
+  check('picking a smaller one switches the level in place',
+    vobPlayer.hlsPlayer.currentLevel === 2 && hlsSources.length === 1,
+    `level=${vobPlayer.hlsPlayer.currentLevel} sources=${hlsSources.length}`);
+  check('and is remembered for the next film',
+    window.localStorage.getItem('ripperx.quality') === '360',
+    String(window.localStorage.getItem('ripperx.quality')));
 
   // Pressing Play again puts the player away, and stopping it matters: a
   // conversion left running keeps reading the disc with nobody watching.

@@ -118,12 +118,14 @@ func (s *server) routes(guard *auth) []route {
 		},
 	}, {
 		Method: http.MethodGet, Pattern: "/api/drives/{id}/hls/index.m3u8", Handler: s.handleHLSPlaylist,
-		Summary: "A video on the disc as a playlist a browser can seek in",
+		Summary: "A video on the disc as playlists a browser can seek in, one per size",
 		Desc: "For video no browser decodes - a DVD's MPEG-2 above all. It is divided " +
 			"into six-second segments this server encodes one at a time, as they are " +
 			"asked for, so jumping to the middle costs one segment rather than the whole " +
 			"film. Ask for a file with path, or for one of the titles from /titles with " +
 			"title=<n>, which is the only way to be right about the length of a DVD. " +
+			"What comes back names one playlist per size, from 144p up to the disc's own, " +
+			"so a player can offer them and change between them without starting again. " +
 			"Needs ffmpeg on the server.",
 		Param: &param{"id", "the drive's id; what to play is the path or title query parameter"},
 		Type:  "application/vnd.apple.mpegurl",
@@ -133,10 +135,24 @@ func (s *server) routes(guard *auth) []route {
 			{http.StatusConflict, "a job has this drive"},
 		},
 	}, {
+		Method: http.MethodGet, Pattern: "/api/drives/{id}/hls/level.m3u8", Handler: s.handleHLSLevel,
+		Summary: "One size's list of segments",
+		Desc: "The playlist above names a size per line; this is one of them, asked for " +
+			"with the same path or title parameter and height=<n>. Every size has the " +
+			"same segments at the same times - only the picture in them differs - so a " +
+			"player changing size keeps its place. Sizes above the disc's own are not " +
+			"offered: nothing is ever scaled up.",
+		Param: &param{"id", "the drive's id; the size is the height query parameter"},
+		Type:  "application/vnd.apple.mpegurl",
+		Other: []status{
+			{http.StatusNotFound, "no such drive, no ffmpeg, or that size is not offered"},
+			{http.StatusConflict, "a job has this drive"},
+		},
+	}, {
 		Method: http.MethodGet, Pattern: "/api/drives/{id}/hls/{seg}", Handler: s.handleHLSSegment,
 		Summary: "One segment of that playlist, encoded on demand",
 		Desc: "Named like 12.ts, and asked for with the same path or title parameter as " +
-			"the playlist. A segment already encoded is answered from memory, which is what " +
+			"the playlist, plus its height. A segment already encoded is answered from memory, which is what " +
 			"makes scrubbing backwards free; the rest hold the drive for as long as one " +
 			"six-second piece takes to read and encode.",
 		Param: &param{"id", "the drive's id, then /hls/<segment number>.ts"},

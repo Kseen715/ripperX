@@ -34,8 +34,12 @@ func TestHLSPlaylistCoversTheWholeFilm(t *testing.T) {
 	}
 }
 
+// pal is a DVD's picture: 720 columns stored, 768 meant, 576 lines.
+var pal = sourceFormat{width: 720, height: 576, sarNum: 16, sarDen: 15}
+
 func TestSegmentArgsPlaceTheSegmentInTheFilm(t *testing.T) {
-	args := strings.Join(segmentArgs("http://127.0.0.1:8998/api/internal/source/abc", 17, 6), " ")
+	args := strings.Join(segmentArgs("http://127.0.0.1:8998/api/internal/source/abc", 17, 6,
+		originalRung(pal.height), pal), " ")
 	// Seventeen segments in: read from 102 seconds, and say so on the way
 	// out, or the player stitches the pieces on top of each other.
 	for _, want := range []string{
@@ -47,8 +51,73 @@ func TestSegmentArgsPlaceTheSegmentInTheFilm(t *testing.T) {
 			t.Errorf("the command line has no %q in it:\n%s", want, args)
 		}
 	}
-	if first := strings.Join(segmentArgs("src", 0, 6), " "); !strings.Contains(first, "-ss 0.000") {
+	if first := strings.Join(segmentArgs("src", 0, 6, originalRung(pal.height), pal), " "); !strings.Contains(first, "-ss 0.000") {
 		t.Errorf("the first segment does not start at the beginning:\n%s", first)
+	}
+
+	// The disc's own size is left alone; every rung below it is scaled, to
+	// a width that keeps the shape and that an encoder will accept.
+	if strings.Contains(args, "flags=bicubic") {
+		t.Errorf("the disc's own size was scaled anyway:\n%s", args)
+	}
+	small, err := rungByHeight(pal, 360)
+	if err != nil {
+		t.Fatal(err)
+	}
+	low := strings.Join(segmentArgs("src", 0, 6, small, pal), " ")
+	for _, want := range []string{"scale=480:360:flags=bicubic", "-crf 28", "-maxrate 1200k", "-b:a 96k"} {
+		if !strings.Contains(low, want) {
+			t.Errorf("360p has no %q in it:\n%s", want, low)
+		}
+	}
+}
+
+// The ladder is the sizes below the disc's own, and never above it: a DVD
+// offered at 1080p would be the same picture, blown up, at four times the
+// bitrate.
+func TestLadderNeverScalesUp(t *testing.T) {
+	var heights []int
+	for _, r := range rungsFor(pal) {
+		heights = append(heights, r.height)
+	}
+	if fmt.Sprint(heights) != "[144 240 360 480 576]" {
+		t.Errorf("a PAL DVD is offered at %v, want 144p to 480p and its own 576", heights)
+	}
+	if w := rungsFor(pal)[len(heights)-1].width(pal); w != 768 {
+		t.Errorf("the disc's own size is %dx576, want 768 wide - its shape, not its storage", w)
+	}
+
+	// A source that is already small offers only what is below it.
+	small := sourceFormat{width: 320, height: 240, sarNum: 1, sarDen: 1}
+	heights = nil
+	for _, r := range rungsFor(small) {
+		heights = append(heights, r.height)
+	}
+	if fmt.Sprint(heights) != "[144 240]" {
+		t.Errorf("a 240-line source is offered at %v, want 144p and its own 240", heights)
+	}
+	if _, err := rungByHeight(small, 720); err == nil {
+		t.Error("a size nobody offered was accepted")
+	}
+}
+
+// The master playlist is what makes the menu in the player: one line per
+// size, with the shape the picture is meant to be shown in.
+func TestMasterPlaylistNamesEverySize(t *testing.T) {
+	body := hlsMaster(rungsFor(pal), pal, func(r rung) string {
+		return fmt.Sprintf("level.m3u8?title=2&height=%d", r.height)
+	})
+	for _, want := range []string{
+		"RESOLUTION=192x144", "RESOLUTION=640x480", "RESOLUTION=768x576",
+		`NAME="144p"`, `NAME="576p"`,
+		"level.m3u8?title=2&height=360",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the playlist has no %q in it:\n%s", want, body)
+		}
+	}
+	if n := strings.Count(body, "#EXT-X-STREAM-INF"); n != 5 {
+		t.Errorf("the playlist offers %d sizes, want 5", n)
 	}
 }
 
@@ -246,14 +315,19 @@ func TestSegmentIsPlayableVideoAtTheRightPlace(t *testing.T) {
 		t.Skipf("this build of ffmpeg could not make the test file: %v: %s", err, out)
 	}
 
-	if d, err := tc.probeDuration(ctx, src); err != nil {
-		t.Errorf("probing the length: %v", err)
-	} else if d < 29 || d > 31 {
-		t.Errorf("the film is %.2f seconds long, want about 30", d)
+	f, err := tc.probeFormat(ctx, src)
+	if err != nil {
+		t.Fatalf("probing the file: %v", err)
+	}
+	if f.duration < 29 || f.duration > 31 {
+		t.Errorf("the film is %.2f seconds long, want about 30", f.duration)
+	}
+	if f.width != 720 || f.height != 576 {
+		t.Errorf("the picture is %dx%d, want 720x576", f.width, f.height)
 	}
 
 	// The third segment: twelve seconds in, six seconds long.
-	seg, err := tc.segment(ctx, src, 2)
+	seg, err := tc.segment(ctx, src, 2, originalRung(f.height), f)
 	if err != nil {
 		t.Fatalf("encoding the segment: %v", err)
 	}
@@ -334,7 +408,7 @@ func TestOneSegmentIsEncodedOnceHoweverOftenItIsAsked(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			got[i], errs[i] = s.segmentFor(t.Context(), d, m, 4)
+			got[i], errs[i] = s.segmentFor(t.Context(), d, m, 4, originalRung(pal.height), pal)
 		}()
 	}
 	wg.Wait()
@@ -352,7 +426,7 @@ func TestOneSegmentIsEncodedOnceHoweverOftenItIsAsked(t *testing.T) {
 			t.Errorf("asker %d was given a segment of its own, so it was encoded twice", i)
 		}
 	}
-	if _, ok := d.media.segment(m.key(), 4); !ok {
+	if _, ok := d.media.segment(m.key()+"@576", 4); !ok {
 		t.Error("the segment was not kept, so asking again would encode it again")
 	}
 	// And the encode that finished must not be left in the way of the next.

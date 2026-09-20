@@ -284,6 +284,8 @@
   "files.takeTickedWhat.one": "{n} выбранный объект, одним архивом.",
   "files.takeTickedWhat.few": "{n} выбранных объекта, одним архивом.",
   "files.takeTickedWhat.many": "{n} выбранных объектов, одним архивом.",
+  "files.quality": "Качество",
+  "files.qualityOriginal": "{size} — как на диске",
   "files.converting": "конвертируется на лету: этот формат браузер не играет; перемотка снова читает диск.",
   "files.cannotPlay": "Браузер не может проиграть этот файл.",
   "files.convertFailed": "Не удалось сконвертировать файл для браузера.",
