@@ -293,9 +293,21 @@ func (s *server) handleDiscArchive(w http.ResponseWriter, r *http.Request) {
 	if name == "" {
 		name = safeName(fsys.Volume().VolumeID, "disc")
 	}
+	// An image is the one format whose length is known before it is built,
+	// because every extent is placed first. Saying so turns the browser's
+	// download from a spinner into a bar with an end.
+	var declaredLength int64
+	if format.ID == isoFormat {
+		if layout, lerr := isoLayout(plan, name+format.Extension); lerr == nil {
+			declaredLength = layout.Size()
+		}
+	}
 	err = d.borrow(func(dev *mmc.Drive) error {
 		w.Header().Set("Content-Type", format.MediaType)
 		w.Header().Set("Content-Disposition", contentDisposition(r, name+format.Extension))
+		if declaredLength > 0 {
+			w.Header().Set("Content-Length", strconv.FormatInt(declaredLength, 10))
+		}
 
 		// Measured in the bytes read off the disc, not the bytes sent: a
 		// compressed archive has no length until it is finished.
@@ -307,7 +319,7 @@ func (s *server) handleDiscArchive(w http.ResponseWriter, r *http.Request) {
 		// The length cannot be known in advance for a compressed format, and
 		// for an uncompressed one it would still be a promise this could not
 		// keep if a sector turned out to be unreadable partway through.
-		aerr := writeArchive(ctx, w, format, fsys, plan, archiveProgress{
+		aerr := writeArchive(ctx, w, format, fsys, plan, name+format.Extension, archiveProgress{
 			starting: func(e iso9660.Entry) { rec.setPhase(e.Path) },
 			finished: func(done int64) { rec.progress(done) },
 		})

@@ -407,6 +407,14 @@ type driveView struct {
 	AppendBlocker string `json:"appendBlocker,omitempty" doc:"why adding files is not offered, when it is not"`
 	BrowseError   string `json:"browseError,omitempty" doc:"why the filesystem could not be read, when it could not"`
 
+	// Fingerprint identifies the disc itself rather than the drive it is
+	// in: the same disc gives the same value whenever and wherever it is
+	// read. It is what /api/discs is keyed by, so a page can show what the
+	// last check of this disc found without having watched it happen. It is
+	// only in the deep view, because working it out means reading the
+	// volume.
+	Fingerprint string `json:"fingerprint,omitempty" doc:"identifies the disc across drives and restarts; the key /api/discs uses"`
+
 	Busy  string `json:"busy,omitempty" doc:"the id of the job holding this drive, if one is"`
 	Error string `json:"error,omitempty" doc:"why the drive could not be asked, when it could not"`
 }
@@ -443,6 +451,9 @@ func (s *server) viewDrive(d *drive, deep bool) driveView {
 
 	// Reading the volume descriptors costs a seek, so it is only done when
 	// the caller asked for the deep answer - the drive page, not the list.
+	if deep {
+		v.Fingerprint, _ = s.discIdentity(d, disc)
+	}
 	if deep && disc.DataTracks > 0 {
 		if fsys, err := d.filesystem(); err != nil {
 			v.BrowseError = err.Error()

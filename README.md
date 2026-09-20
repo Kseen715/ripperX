@@ -43,9 +43,18 @@ service account is in the `cdrom` group.
   Rock Ridge names are used where the disc has
   them, so what you see is what the disc's author saw rather than the 8.3
   version.
-- **Downloads a folder as one archive** — zip, tar, tar.gz, tar.bz2 or
-  tar.xz — produced as the disc is read, so nothing is staged on the server
-  first however large the folder is.
+- **Downloads a folder as one file** — zip, tar, tar.gz, tar.bz2, tar.xz, or
+  an **`.iso`** — produced as the disc is read, so nothing is staged on the
+  server first however large the folder is. The `.iso` is mastered here, in
+  Go: ISO 9660 with a Joliet tree and Rock Ridge annotations, which means a
+  folder taken off a disc can be burned straight back onto one without being
+  unpacked first, and its long names, permissions and symlinks survive the
+  round trip.
+- **Says how big a folder is, when asked.** A file's size is in its own
+  directory record and costs nothing; a folder's means reading every
+  directory record beneath it, one seek each. So it is a button rather than
+  a column that would make every listing slow — one folder, or the whole
+  listing in a single pass over the drive.
 - **Plays media in the browser**: an audio track or a media file on a data
   disc, streamed from the disc with byte ranges honoured, so seeking in the
   browser seeks the laser. There is an `.m3u` for VLC, with a token in each
@@ -88,7 +97,15 @@ service account is in the `cdrom` group.
   twice without noticing.
 - **Survives a restart.** Finished jobs and every surface scan go into the
   database; only a job that was still running is lost, and that is not
-  something to pretend survived.
+  something to pretend survived. A disc put back in the drive shows what the
+  last check of it found, recognised by its fingerprint rather than by a job
+  that is no longer in memory.
+- **Speaks more than one language.** Every word on the page comes out of a
+  locale file rather than out of the markup, so adding a language is adding
+  one JSON file to `cmd/ripperx/web/locales` and nothing else. The menu is
+  built from the files that are there; `-lang` picks the one a server serves
+  by default, and anything a translation has no words for yet falls back to
+  it and then to English. English and Russian ship.
 
 ## Installing it
 
@@ -140,6 +157,16 @@ there):
 apt install xorriso        # Debian, Ubuntu
 dnf install xorriso        # Fedora
 ```
+
+One setting is worth knowing about before the first burn from a share. An
+image on an SMB share is copied to a local file before the laser starts —
+reading over the network at the speed a laser demands is how a buffer
+underrun happens — and by default that copy goes beside the images when they
+are local, or into the system temporary directory when they are not. On a
+systemd machine that directory is usually a tmpfs, which is to say RAM, and
+a dual-layer image is 8 GB. Point `-stage-dir` at a real directory whenever
+the images are remote; ripperX checks the room there before it copies, and
+refuses with the figures rather than filling anything up.
 
 `examples/systemd/ripperx.service` is the unit `install.sh` renders — it
 runs ripperX as a confined service that can reach the drive nodes and its

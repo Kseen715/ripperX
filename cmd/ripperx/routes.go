@@ -18,6 +18,13 @@ func (s *server) routes(guard *auth) []route {
 			"burner is installed, and whether a login is required.",
 		Resp: statusResponse{},
 	}, {
+		Method: http.MethodGet, Pattern: "/api/locales", Handler: s.handleLocales,
+		Summary: "The languages this build carries, and which one it prefers",
+		Desc: "Readable without signing in, because the sign-in page needs its own words. " +
+			"The strings themselves are plain JSON files served from /locales/<code>.json; " +
+			"adding a language to a build is adding one of those and nothing else.",
+		Resp: localesResponse{},
+	}, {
 		Method: http.MethodGet, Pattern: "/api/drives", Handler: s.handleDrives,
 		Summary: "Every drive, with what it can do and what is in it",
 		Desc: "The shallow answer: capabilities and disc, but no filesystem. A drive that " +
@@ -63,6 +70,20 @@ func (s *server) routes(guard *auth) []route {
 			{http.StatusConflict, "a job has this drive"},
 			{http.StatusUnprocessableEntity, "this disc has no filesystem ripperX can read"},
 			{http.StatusNotFound, "no such directory on the disc"},
+		},
+	}, {
+		Method: http.MethodGet, Pattern: "/api/drives/{id}/sizes", Handler: s.handleDirSizes,
+		Summary: "How big one or more folders on the disc are",
+		Desc: "A file's size is in its own directory record; a folder's is the sum of " +
+			"everything under it, which means reading every directory record in the tree. " +
+			"That is why a listing does not include it and this endpoint exists. Repeat " +
+			"the path parameter to ask about several folders in one pass over the drive.",
+		Param: &param{"id", "the drive's id; the directories are the repeated path query parameter"},
+		Resp:  dirSizesResponse{},
+		Other: []status{
+			{http.StatusConflict, "a job has this drive"},
+			{http.StatusUnprocessableEntity, "this disc has no filesystem ripperX can read"},
+			{http.StatusBadRequest, "too many directories were asked about at once"},
 		},
 	}, {
 		Method: http.MethodGet, Pattern: "/api/drives/{id}/file", Handler: s.handleDiscFile,

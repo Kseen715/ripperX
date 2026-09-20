@@ -35,7 +35,7 @@ type history struct {
 
 // schema is applied on open and is idempotent. The version pragma is there
 // so a later change can be migrated rather than guessed at.
-const schemaVersion = 1
+const schemaVersion = 2
 
 const schema = `
 CREATE TABLE IF NOT EXISTS jobs (
@@ -79,7 +79,8 @@ CREATE TABLE IF NOT EXISTS scans (
     grade        TEXT    NOT NULL,
     score        REAL    NOT NULL,
     summary      TEXT,
-    map          TEXT               -- JSON array of per-bucket severity
+    map          TEXT,              -- JSON array of per-bucket severity
+    result       TEXT               -- the whole ScanResult, as JSON
 );
 CREATE INDEX IF NOT EXISTS scans_disc ON scans(disc, scanned_at DESC);
 CREATE INDEX IF NOT EXISTS scans_at ON scans(scanned_at DESC);
@@ -105,11 +106,50 @@ func openHistory(path string) (*history, error) {
 		db.Close()
 		return nil, fmt.Errorf("preparing the history database: %w", err)
 	}
+	if err := migrate(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("bringing the history database up to date: %w", err)
+	}
 	if _, err := db.Exec("PRAGMA user_version = " + strconv.Itoa(schemaVersion)); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return &history{db: db, path: path}, nil
+}
+
+// migrate adds what a database written by an older ripperX does not have.
+// SQLite has no "add this column if it is not there", so the columns are
+// read and compared - which is also the check that says the migration has
+// already happened, and makes running it twice free.
+func migrate(db *sql.DB) error {
+	rows, err := db.Query("PRAGMA table_info(scans)")
+	if err != nil {
+		return err
+	}
+	have := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, pk int
+		var def any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &def, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		have[name] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	// The whole result, so a scan survives a restart with everything the
+	// page shows rather than only the summary the columns above hold.
+	if !have["result"] {
+		if _, err := db.Exec("ALTER TABLE scans ADD COLUMN result TEXT"); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (h *history) close() error {
@@ -191,13 +231,13 @@ func (h *history) saveScan(j Job, fingerprint, label string, disc *mmc.Disc, res
         INSERT INTO scans (job_id, disc, label, profile, drive, scanned_at, sectors,
                            c2_supported, c2_total, c2_sectors, c2_max, unreadable,
                            slow_blocks, read_seconds, avg_kbps, min_kbps,
-                           grade, score, summary, map)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                           grade, score, summary, map, result)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(job_id) DO NOTHING`,
 		j.ID, fingerprint, label, disc.ProfileName, j.Drive, millis(time.Now()), res.Sectors,
 		boolToInt(res.C2Supported), res.C2Total, res.C2Sectors, res.C2Max, res.Unreadable,
 		res.SlowBlocks, res.ReadSeconds, res.AvgKBps, res.MinKBps,
-		string(res.Grade), res.Score, res.Summary, asJSON(res.Map))
+		string(res.Grade), res.Score, res.Summary, asJSON(res.Map), asJSON(res))
 	return err
 }
 
@@ -280,6 +320,60 @@ type scanRecord struct {
 	Score      float64 `json:"score"`
 	Summary    string  `json:"summary"`
 	Map        []int   `json:"map,omitempty"`
+	// Result is the whole thing the scan found, as the job carried it. It
+	// is what lets the page draw a scan it did not watch happen - after a
+	// reload, or after a restart, or from another browser entirely - rather
+	// than showing nothing until the disc is checked again.
+	Result *ScanResult `json:"result,omitempty"`
+}
+
+// scanColumns are the figures that have had a column of their own since
+// before the whole result was kept, and that a scan recorded back then is
+// therefore still worth something for.
+type scanColumns struct {
+	c2Max       int
+	slowBlocks  int
+	readSeconds float64
+	avgKBps     float64
+	minKBps     float64
+}
+
+// rebuildResult returns what the scan found. Normally that is the recorded
+// result, verbatim.
+//
+// A scan recorded before there was a column to put it in has no such row,
+// and the alternative is showing nothing at all about a disc that was
+// checked - which reads as a disc nobody has ever looked at. So one is
+// assembled out of the columns that were kept. Nothing is invented: the
+// three fields that were never recorded separately - where the unreadable
+// sectors were, how many places the drive struggled in, and the notes -
+// stay empty, and the page leaves their rows out.
+func rebuildResult(recorded string, r scanRecord, cols scanColumns) *ScanResult {
+	if recorded != "" {
+		var full ScanResult
+		if json.Unmarshal([]byte(recorded), &full) == nil {
+			return &full
+		}
+	}
+	return &ScanResult{
+		Sectors:     r.Sectors,
+		C2Supported: r.Measured,
+		C2Total:     r.C2Total,
+		C2Sectors:   r.C2Sectors,
+		C2Max:       cols.c2Max,
+		Unreadable:  r.Unreadable,
+		ReadSeconds: cols.readSeconds,
+		AvgKBps:     cols.avgKBps,
+		MinKBps:     cols.minKBps,
+		SlowBlocks:  cols.slowBlocks,
+		Grade:       r.Grade,
+		Score:       r.Score,
+		Summary:     r.Summary,
+		Map:         r.Map,
+		// The whole disc was read, so the strip is drawn as read rather
+		// than as a scan that stopped partway.
+		Buckets: mapBuckets,
+	}
 }
 
 // discHistory is one disc and every time it has been checked, oldest first,
@@ -308,7 +402,8 @@ func (h *history) discs(fingerprint string, withMap bool) ([]discHistory, error)
 	query := `
         SELECT job_id, disc, COALESCE(label,''), COALESCE(profile,''), COALESCE(drive,''),
                scanned_at, sectors, c2_sectors, c2_total, unreadable, grade, score,
-               c2_supported, COALESCE(summary,''), COALESCE(map,'[]')
+               c2_supported, COALESCE(summary,''), COALESCE(map,'[]'), COALESCE(result,''),
+               c2_max, slow_blocks, read_seconds, avg_kbps, min_kbps
         FROM scans`
 	args := []any{}
 	if fingerprint != "" {
@@ -328,15 +423,19 @@ func (h *history) discs(fingerprint string, withMap bool) ([]discHistory, error)
 	for rows.Next() {
 		var r scanRecord
 		var at int64
-		var mapJSON string
+		var mapJSON, resultJSON string
+		var cols scanColumns
 		if err := rows.Scan(&r.JobID, &r.Disc, &r.Label, &r.Profile, &r.Drive,
 			&at, &r.Sectors, &r.C2Sectors, &r.C2Total, &r.Unreadable,
-			&r.Grade, &r.Score, &r.Measured, &r.Summary, &mapJSON); err != nil {
+			&r.Grade, &r.Score, &r.Measured, &r.Summary, &mapJSON, &resultJSON,
+			&cols.c2Max, &cols.slowBlocks, &cols.readSeconds,
+			&cols.avgKBps, &cols.minKBps); err != nil {
 			return nil, err
 		}
 		r.ScannedAt = fromMillis(at)
 		if withMap {
 			_ = json.Unmarshal([]byte(mapJSON), &r.Map)
+			r.Result = rebuildResult(resultJSON, r, cols)
 		}
 		d, ok := byDisc[r.Disc]
 		if !ok {

@@ -70,18 +70,18 @@
 <div class="wrap">
   <header class="cut">
     <div class="regmark"></div>
-    <h1>Epson Stylus CX4300 - HTTP interface</h1>
-    <p id="sub">loading&hellip;</p>
+    <h1>ripperX &mdash; <span data-i18n="docs.title">HTTP interface</span></h1>
+    <p id="sub" data-i18n="docs.loading">loading&hellip;</p>
     <div class="row" style="margin-top:10px">
-      <a class="btn" href="/">Back to the scanner</a>
-      <a class="btn" href="/api/openapi.json">OpenAPI document</a>
+      <a class="btn" href="/" data-i18n="docs.back">Back to ripperX</a>
+      <a class="btn" href="/api/openapi.json" data-i18n="docs.openapi">OpenAPI document</a>
     </div>
   </header>
 
   <div id="error" class="err" hidden></div>
 
   <div class="panel cut">
-    <p class="label">Endpoints</p>
+    <p class="label" data-i18n="docs.endpoints">Endpoints</p>
     <div class="toc" id="toc"></div>
     <p class="muted" id="authNote" style="margin:12px 0 0;font-size:12px"></p>
   </div>
@@ -94,6 +94,7 @@
     describes what this build does rather than what someone wrote down.
   </p>
 </div>
+<script src="i18n.js"></script>
 <script>
 const el = (id) => document.getElementById(id);
 let schemas = {};
@@ -181,7 +182,8 @@ function fieldTable(schema) {
   const rows = fieldRows(schema, 0, new Set());
   if (!rows.length) return null;
   const table = document.createElement('table');
-  table.innerHTML = '<thead><tr><th>Field</th><th>Type</th><th>Required</th><th></th></tr></thead>';
+  table.innerHTML = `<thead><tr><th>${t('docs.field')}</th><th>${t('docs.type')}</th>` +
+    `<th>${t('docs.required')}</th><th></th></tr></thead>`;
   const body = document.createElement('tbody');
   for (const r of rows) {
     const tr = document.createElement('tr');
@@ -193,7 +195,7 @@ function fieldTable(schema) {
     type.textContent = r.type;
     const req = document.createElement('td');
     req.className = r.required ? 'req' : 'opt';
-    req.textContent = r.required ? 'yes' : 'no';
+    req.textContent = t(r.required ? 'docs.yes' : 'docs.no');
     const desc = document.createElement('td');
     desc.textContent = r.desc;
     tr.append(name, type, req, desc);
@@ -299,7 +301,7 @@ function render(spec) {
     if (open) {
       const badge = document.createElement('span');
       badge.className = 'tag open';
-      badge.textContent = 'no login';
+      badge.textContent = t('docs.noLogin');
       head.appendChild(badge);
     }
     panel.appendChild(head);
@@ -319,7 +321,7 @@ function render(spec) {
     if (op.parameters && op.parameters.length) {
       const box = section(panel, 'Path');
       const table = document.createElement('table');
-      table.innerHTML = '<thead><tr><th>Name</th><th>Type</th><th></th></tr></thead>';
+      table.innerHTML = `<thead><tr><th>${t('docs.name')}</th><th>${t('docs.type')}</th><th></th></tr></thead>`;
       const body = document.createElement('tbody');
       for (const prm of op.parameters) {
         const tr = document.createElement('tr');
@@ -341,7 +343,7 @@ function render(spec) {
       const note = document.createElement('p');
       note.className = 'muted';
       note.style.cssText = 'margin:8px 0 0;font-size:12px';
-      note.textContent = 'A field left out is taken at its zero value.';
+      note.textContent = t('docs.zeroValue');
       box.appendChild(note);
     }
 
@@ -376,16 +378,20 @@ function render(spec) {
 }
 
 (async function load() {
+  // The page's own chrome is translated; what the server says about its
+  // endpoints is not, because that text is generated from the Go types and
+  // lives on the other side of the wire.
+  await i18n.start();
   try {
     const r = await fetch('/api/openapi.json');
     if (r.status === 401) { window.location.replace('/login'); return; }
     if (!r.ok) throw new Error('HTTP ' + r.status);
     render(await r.json());
   } catch (e) {
-    el('sub').textContent = 'unavailable';
+    el('sub').textContent = t('docs.unavailable');
     const box = el('error');
     box.hidden = false;
-    box.textContent = 'Could not load /api/openapi.json: ' + e;
+    box.textContent = t('docs.couldNotLoad') + ' ' + e;
   }
 })();
 </script>

@@ -34,17 +34,29 @@ const state = {
   pickAt: 0,
   // Whether the image list is showing everything, or only its first page.
   imagesAll: false,
+  // The last directory listing, kept so a folder size arriving later can be
+  // drawn into it without asking the drive for the listing again.
+  browse: null,
+  // How big each folder turned out to be, by path. A folder's size costs a
+  // walk of its whole tree, so it is asked for once and then remembered for
+  // as long as the disc is in the drive.
+  dirSizes: new Map(),
+  // The last recorded check of a disc, by its fingerprint, read out of the
+  // database rather than out of a job. It is what a page that has just been
+  // reloaded - or a server that has just been restarted - shows instead of
+  // pretending the disc was never checked.
+  storedScans: new Map(),
 };
 
 /* ---------- small helpers ---------- */
 
 function bytes(n) {
   if (n === null || n === undefined) return '-';
-  if (n < 1024) return `${n} B`;
-  const units = ['kB', 'MB', 'GB', 'TB'];
+  if (n < 1024) return `${n} ${t('unit.b')}`;
+  const units = ['unit.kb', 'unit.mb', 'unit.gb', 'unit.tb'];
   let v = n / 1024, i = 0;
   while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
-  return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
+  return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${t(units[i])}`;
 }
 
 function rate(n) { return n > 0 ? `${bytes(n)}/s` : ''; }
@@ -60,12 +72,10 @@ function duration(sec) {
 // seconds left" on a job that will not keep to it anyway.
 function eta(seconds) {
   if (!seconds || seconds <= 0) return '';
-  if (seconds < 45) return 'under a minute left';
+  if (seconds < 45) return t('eta.underMinute');
   const mins = Math.round(seconds / 60);
-  if (mins < 60) return `about ${mins} minute${mins > 1 ? 's' : ''} left`;
-  const hours = Math.floor(mins / 60);
-  const rest = mins % 60;
-  return `about ${hours}h ${rest}m left`;
+  if (mins < 60) return tn('eta.minutes', mins);
+  return t('eta.hours', { h: Math.floor(mins / 60), m: mins % 60 });
 }
 
 function when(iso) {
@@ -195,9 +205,9 @@ function setWidth(node, w) {
 // undone.
 function ask({ title, what, action, danger }) {
   const dlg = el('confirmDialog');
-  setText(el('confirmTitle'), title || 'Are you sure?');
+  setText(el('confirmTitle'), title || t('confirm.title'));
   setText(el('confirmWhat'), what || '');
-  setText(el('confirmGo'), action || 'Yes');
+  setText(el('confirmGo'), action || t('common.yes'));
   setText(el('confirmWarn'), danger || '');
   setHidden(el('confirmWarn'), !danger);
   return new Promise((resolve) => {
@@ -223,10 +233,10 @@ async function api(path, opts) {
   const r = await fetch(path, opts);
   if (r.status === 401) {
     window.location.replace('/login');
-    throw new Error('signed out');
+    throw new Error(t('error.signedOut'));
   }
   if (!r.ok) {
-    let msg = `HTTP ${r.status}`;
+    let msg = t('error.http', { status: r.status });
     try { msg = (await r.json()).error || msg; } catch (e) { /* not JSON */ }
     throw new Error(msg);
   }
@@ -250,6 +260,9 @@ function forgetDisc() {
   for (const name of ['dischead', 'rip', 'scan', 'burn', 'append', 'files', 'audio', 'drive']) {
     forget(name);
   }
+  // The sizes belonged to the tree on the disc that has just left.
+  state.dirSizes.clear();
+  state.browse = null;
 }
 
 // discKey changes exactly when the disc does. It is what decides whether the
@@ -285,13 +298,13 @@ function createDriveRow(d) {
   if (state.status && state.status.allowEject) {
     const tray = document.createElement('div');
     tray.className = 'tray';
-    tray.appendChild(trayButton(d, 'eject', 'Open'));
-    tray.appendChild(trayButton(d, 'load', 'Close'));
+    tray.appendChild(trayButton(d, 'eject', t('drives.open')));
+    tray.appendChild(trayButton(d, 'load', t('drives.close')));
 
-    const refresh = text('button', 'Re-read');
+    const refresh = text('button', t('drives.reread'));
     refresh.type = 'button';
     refresh.dataset.act = 'refresh';
-    refresh.title = 'Forget what is known about the disc and ask the drive again';
+    refresh.title = t('drives.rereadWhy');
     refresh.addEventListener('click', async () => {
       refresh.disabled = true;
       try { await post(`/api/drives/${encodeURIComponent(d.id)}/refresh`); fail(''); }
@@ -311,8 +324,8 @@ function updateDriveRow(row, d) {
   setText(row.querySelector('.dwhat'), `${d.path} \u00b7 ${describeDisc(d)}`);
 
   const chip = row.querySelector('.chip');
-  if (d.busy) { setText(chip, 'working'); chip.className = 'chip busy'; }
-  else if (!d.disc || !d.disc.present) { setText(chip, 'empty'); chip.className = 'chip none'; }
+  if (d.busy) { setText(chip, t('drives.working')); chip.className = 'chip busy'; }
+  else if (!d.disc || !d.disc.present) { setText(chip, t('drives.empty')); chip.className = 'chip none'; }
   else { setText(chip, d.disc.profileName); chip.className = 'chip'; }
 
   for (const b of row.querySelectorAll('.tray button')) setDisabled(b, !!d.busy);
@@ -324,9 +337,7 @@ function trayButton(d, action, label) {
   const b = text('button', label);
   b.type = 'button';
   b.dataset.act = action;
-  b.title = action === 'eject'
-    ? 'Open this drive\u2019s tray'
-    : 'Close this drive\u2019s tray and read what is in it';
+  b.title = t(action === 'eject' ? 'drives.openWhy' : 'drives.closeWhy');
   b.addEventListener('click', async () => {
     b.disabled = true;
     try {
@@ -342,12 +353,12 @@ function trayButton(d, action, label) {
 
 function describeDisc(d) {
   if (d.error) return d.error;
-  if (!d.disc || !d.disc.present) return d.disc && d.disc.error ? d.disc.error : 'no disc';
+  if (!d.disc || !d.disc.present) return d.disc && d.disc.error ? d.disc.error : t('disc.none');
   const bits = [];
   if (d.disc.statusName) bits.push(d.disc.statusName);
   if (d.disc.sectors) bits.push(bytes(d.disc.dataBytes));
-  if (d.disc.audioTracks) bits.push(`${d.disc.audioTracks} audio track${d.disc.audioTracks > 1 ? 's' : ''}`);
-  if (d.disc.dataTracks) bits.push('data');
+  if (d.disc.audioTracks) bits.push(tn('disc.audioTracks', d.disc.audioTracks));
+  if (d.disc.dataTracks) bits.push(t('disc.data'));
   return bits.join(' · ');
 }
 
@@ -380,6 +391,7 @@ async function loadDetail() {
     fail(String(e.message || e));
   }
   renderWork();
+  loadStoredScan();
   if (state.tab === 'files') loadDir(state.path);
 }
 
@@ -390,13 +402,13 @@ async function loadDetail() {
 // a machine that cannot burn is not asked about burning. Hiding what cannot
 // be done is most of what makes this page quiet.
 const panes = {
-  rip:   { id: 'paneRip',   label: 'Rip' },
-  files: { id: 'paneFiles', label: 'Files' },
-  audio: { id: 'paneAudio', label: 'Audio' },
-  check: { id: 'paneCheck', label: 'Check' },
-  burn:  { id: 'paneBurn',  label: 'Burn' },
-  add:   { id: 'paneAdd',   label: 'Add files' },
-  drive: { id: 'paneDrive', label: 'Drive' },
+  rip:   { id: 'paneRip',   label: 'pane.rip' },
+  files: { id: 'paneFiles', label: 'pane.files' },
+  audio: { id: 'paneAudio', label: 'pane.audio' },
+  check: { id: 'paneCheck', label: 'pane.check' },
+  burn:  { id: 'paneBurn',  label: 'pane.burn' },
+  add:   { id: 'paneAdd',   label: 'pane.add' },
+  drive: { id: 'paneDrive', label: 'pane.drive' },
 };
 
 function segItems(d) {
@@ -448,7 +460,7 @@ function setTab(tab) {
 function renderSeg(d) {
   const items = segItems(d);
   sync(el('seg'), items, (k) => k, (k) => {
-    const b = text('button', panes[k].label);
+    const b = text('button', t(panes[k].label));
     b.type = 'button';
     b.addEventListener('click', () => setTab(k));
     return b;
@@ -510,13 +522,13 @@ function renderDiscHead(d) {
     disc && disc.sessions, vol && vol.volumeId, vol && vol.format,
     d.error, disc && disc.error], () => {
     setText(el('discTitle'), present
-      ? ((vol && vol.volumeId) || (disc.profileName ? `a ${disc.profileName}` : 'a disc'))
-      : 'Nothing in the drive');
+      ? ((vol && vol.volumeId) || (disc.profileName
+          ? t('disc.aProfile', { profile: disc.profileName }) : t('disc.aDisc')))
+      : t('disc.nothingIn'));
     // An empty drive says so once, in the heading. The line under it is for
     // what to do about it - or for a fault, which is the one case where the
     // drive has something to say that the heading does not.
-    setText(el('discLine'), present ? discSummary(d)
-      : (d.error || 'Close the tray with the button on the drive above, or press Re-read.'));
+    setText(el('discLine'), present ? discSummary(d) : (d.error || t('disc.closeTrayHint')));
 
     const tags = [];
     if (present) {
@@ -524,9 +536,9 @@ function renderDiscHead(d) {
       if (vol && vol.format) tags.push(['chip', vol.format]);
       if (disc.statusName) tags.push(['chip none', disc.statusName]);
     }
-    sync(el('discTags'), tags, (t) => t[1],
+    sync(el('discTags'), tags, (tag) => tag[1],
       () => text('span', '', 'chip'),
-      (node, t) => { setText(node, t[1]); node.className = t[0]; });
+      (node, tag) => { setText(node, tag[1]); node.className = tag[0]; });
 
     setHidden(el('discMore'), !present);
     if (present) renderDiscFacts(d);
@@ -536,11 +548,11 @@ function renderDiscHead(d) {
 function discSummary(d) {
   const disc = d.disc;
   const bits = [];
-  if (disc.dataTracks && disc.dataBytes) bits.push(`${bytes(disc.dataBytes)} of data`);
-  if (disc.audioTracks) bits.push(`${disc.audioTracks} audio track${disc.audioTracks > 1 ? 's' : ''}`);
-  if (disc.sessions > 1) bits.push(`${disc.sessions} sessions`);
-  if (d.volume && d.volume.format) bits.push(`read as ${d.volume.format}`);
-  if (!bits.length) bits.push(disc.statusName || 'nothing readable on it');
+  if (disc.dataTracks && disc.dataBytes) bits.push(t('disc.ofData', { size: bytes(disc.dataBytes) }));
+  if (disc.audioTracks) bits.push(tn('disc.audioTracks', disc.audioTracks));
+  if (disc.sessions > 1) bits.push(tn('disc.sessions', disc.sessions));
+  if (d.volume && d.volume.format) bits.push(t('disc.readAs', { format: d.volume.format }));
+  if (!bits.length) bits.push(disc.statusName || t('disc.nothingReadable'));
   return bits.join(' · ');
 }
 
@@ -548,20 +560,20 @@ function renderDiscFacts(d) {
   const disc = d.disc;
   const vol = d.volume;
   dl(el('discFacts'), [
-    ['Disc', disc.profileName],
-    ['State', disc.statusName + (disc.erasable ? ', erasable' : '')],
-    ['Sessions', disc.sessions || null],
-    ['Tracks', `${disc.tracks ? disc.tracks.length : 0}` +
-      (disc.audioTracks ? ` (${disc.audioTracks} audio)` : '')],
-    ['Sectors', disc.sectors ? disc.sectors.toLocaleString() : null],
-    ['As .iso', disc.dataTracks ? bytes(disc.dataBytes) : null],
-    ['As .img', disc.rawReadable ? bytes(disc.rawBytes) : null],
-    ['Volume', vol ? vol.volumeId : null],
-    ['Filesystem', vol ? (vol.format || 'ISO 9660') : null],
-    ['Published', vol && vol.publisher ? vol.publisher : null],
-    ['Mastered', vol && vol.created ? when(vol.created) : null],
-    ['Names', vol ? namingScheme(vol) : null],
-    ['Media id', disc.mediaId || null],
+    [t('fact.disc'), disc.profileName],
+    [t('fact.state'), disc.statusName + (disc.erasable ? t('fact.erasable') : '')],
+    [t('fact.sessions'), disc.sessions || null],
+    [t('fact.tracks'), `${disc.tracks ? disc.tracks.length : 0}` +
+      (disc.audioTracks ? ` ${t('fact.ofWhichAudio', { n: disc.audioTracks })}` : '')],
+    [t('fact.sectors'), disc.sectors ? disc.sectors.toLocaleString(i18n.code) : null],
+    [t('fact.asIso'), disc.dataTracks ? bytes(disc.dataBytes) : null],
+    [t('fact.asImg'), disc.rawReadable ? bytes(disc.rawBytes) : null],
+    [t('fact.volume'), vol ? vol.volumeId : null],
+    [t('fact.filesystem'), vol ? (vol.format || 'ISO 9660') : null],
+    [t('fact.published'), vol && vol.publisher ? vol.publisher : null],
+    [t('fact.mastered'), vol && vol.created ? when(vol.created) : null],
+    [t('fact.names'), vol ? namingScheme(vol) : null],
+    [t('fact.mediaId'), disc.mediaId || null],
   ]);
 }
 
@@ -571,9 +583,9 @@ function renderRipPane(d) {
     // The menu offers only what this disc and this drive can actually do,
     // so nothing here fails after it is pressed.
     const kinds = [];
-    if (d.canRipIso) kinds.push(['iso', '.iso - the filesystem, 2048 bytes a sector']);
-    if (d.canRipImg) kinds.push(['img', '.img - every byte on the disc, with a cue sheet']);
-    if (d.canRipAudio) kinds.push(['audio', '.wav - one file per audio track']);
+    if (d.canRipIso) kinds.push(['iso', t('rip.kindIso')]);
+    if (d.canRipImg) kinds.push(['img', t('rip.kindImg')]);
+    if (d.canRipAudio) kinds.push(['audio', t('rip.kindAudio')]);
     const sel = el('ripKind');
     const was = sel.value;
     sel.textContent = '';
@@ -591,13 +603,13 @@ function renderRipPane(d) {
 
 function ripHint(d) {
   if (!d.canRipIso && !d.canRipImg && !d.canRipAudio) {
-    return d.browseError || 'There is nothing on this disc that this drive can read.';
+    return d.browseError || t('rip.nothingReadable');
   }
   const bits = [];
   if (!d.canRipImg && d.disc && d.disc.profile && d.disc.present) {
-    bits.push('A raw .img is not offered: this drive will not hand over 2352-byte sectors from this disc.');
+    bits.push(t('rip.noRawHint'));
   }
-  bits.push('Sectors the drive cannot read are written as zeroes and listed on the job, so a damaged disc still yields everything else.');
+  bits.push(t('rip.badSectorHint'));
   return bits.join(' ');
 }
 
@@ -620,8 +632,8 @@ function imageTags(f) {
   if (isArchiveName(f.name)) {
     // What will happen to it, which is the thing worth knowing before
     // spending a disc: not the archive, the files in it.
-    tags.push(['pack', 'unpacked to files']);
-    if (f.needs) tags.push(['disc', `needs ${f.needs}`]);
+    tags.push(['pack', t('image.unpacked')]);
+    if (f.needs) tags.push(['disc', t('image.needs', { disc: f.needs })]);
     return tags;
   }
   const boot = f.boot;
@@ -629,12 +641,12 @@ function imageTags(f) {
     for (const p of boot.platforms || []) tags.push(['fw', p.name]);
     for (const a of boot.architectures || []) tags.push(['arch', a]);
   } else if (f.error) {
-    tags.push(['bad', 'not an ISO']);
+    tags.push(['bad', t('image.notAnISO')]);
   } else if (boot) {
-    tags.push(['bad', 'will not boot']);
+    tags.push(['bad', t('image.willNotBoot')]);
   }
-  if (f.needs === noDiscFits) tags.push(['bad', 'too big for any disc']);
-  else if (f.needs) tags.push(['disc', `needs ${f.needs}`]);
+  if (f.needs === noDiscFits) tags.push(['bad', t('image.tooBig')]);
+  else if (f.needs) tags.push(['disc', t('image.needs', { disc: f.needs })]);
   return tags;
 }
 
@@ -693,7 +705,7 @@ function renderPickButton() {
   name.className = 'pick-name';
   if (!f) {
     name.classList.add('pick-none');
-    name.textContent = pickable().length ? 'Choose an image' : 'Nothing to burn';
+    name.textContent = t(pickable().length ? 'burn.choose' : 'burn.nothingToBurn');
     btn.appendChild(name);
     return;
   }
@@ -741,9 +753,7 @@ function renderPickList() {
   const empty = el('burnEmpty');
   empty.hidden = files.length > 0;
   if (!files.length) {
-    empty.textContent = pickable().length
-      ? 'Nothing here matches that.'
-      : 'Nothing in this library is a whole number of 2048-byte sectors.';
+    empty.textContent = t(pickable().length ? 'burn.noMatch' : 'burn.noneWhole');
   }
   const here = list.querySelector('.here');
   if (here) {
@@ -838,7 +848,7 @@ function drawBurnBox(d) {
   setHidden(el('burnBlocked'), !blocked);
   setHidden(el('burnFields'), blocked);
   if (blocked) {
-    setText(el('burnBlocked'), d.burnBlocker || 'This disc cannot be written to.');
+    setText(el('burnBlocked'), d.burnBlocker || t('burn.blocked'));
   }
   setHidden(el('btnErase'), !(d.disc && d.disc.present && d.disc.erasable));
 
@@ -862,11 +872,8 @@ function drawBurnBox(d) {
   sel.value = burnable.some((f) => f.name === was) ? was : '';
   setDisabled(el('btnBurn'), burnable.length === 0 || !!d.busy);
   el('burnHint').textContent = burnable.length === 0
-    ? (el('burnSource').value === 'isos'
-        ? 'Nothing in the ISO library is a whole number of 2048-byte sectors.'
-        : 'Nothing in the store can be written to a disc: an image has to be a whole '
-          + 'number of 2048-byte sectors, and an archive has to be one ripperX can read.')
-    : 'Everything that can be checked is checked before the laser is switched on. Afterwards every sector is read back and compared with the image.';
+    ? t(el('burnSource').value === 'isos' ? 'burn.hintNoneInLibrary' : 'burn.hintNoneInStore')
+    : t('burn.hintChecks');
   renderPickButton();
   if (pickerOpen()) renderPickList();
   showBurnImageInfo();
@@ -889,9 +896,7 @@ async function showBurnImageInfo() {
     // Nothing to ask the server: this one is not an image, and what will
     // happen to it does not depend on what is inside it.
     state.burnInfo = null;
-    note.textContent = 'This is an archive. The disc gets the files inside it, ' +
-      'as a filesystem \u2014 not the archive file. Every one is read back off the ' +
-      'disc afterwards and compared with what went on.';
+    note.textContent = t('burn.archiveNote');
     note.className = 'note';
     note.hidden = false;
     return;
@@ -929,21 +934,65 @@ function showImageNote(info) {
 
 /* ---------- how healthy the disc is ---------- */
 
-// The newest finished scan of this drive, which is what the disc panel
-// shows. It comes from the live job list rather than from the database, so
-// the result appears the moment the scan ends.
+// What the Check panel shows. A scan this server still has in memory is
+// preferred, because it appears the moment the scan ends and it keeps
+// ticking while one runs.
+//
+// Everything else comes out of the database, by the disc's fingerprint. The
+// jobs in memory are lost when the process stops and dropped once sixty
+// newer ones exist, and a check that vanished on a restart - or on a reload
+// in a browser that had never seen the job - looked exactly like a disc
+// nobody had ever checked. The database has had the answer all along; this
+// is what asks it.
 function latestScan(driveID) {
   return state.jobs.find((j) => j.kind === 'scan' && j.drive === driveID && j.scan) || null;
 }
 
-const gradeWords = {
-  pristine: 'As good as it was made',
-  good: 'Healthy',
-  worn: 'Wearing out',
-  degraded: 'Close to failing',
-  failing: 'Already losing data',
-  unknown: 'Not measurable',
-};
+function scanToShow(d) {
+  return latestScan(d.id) || state.storedScans.get(d.fingerprint || '') || null;
+}
+
+// loadStoredScan fetches the last recorded check of whatever is in the
+// selected drive and shapes it like a job, so one function draws both. It is
+// asked for once per disc: the answer only changes when a new scan finishes,
+// and that arrives as a job instead.
+async function loadStoredScan() {
+  const d = state.detail;
+  const fp = d && d.fingerprint;
+  if (!fp || state.storedScans.has(fp)) return;
+  // Recorded as attempted before the request goes out, so a disc with no
+  // history is not asked about again on every redraw.
+  state.storedScans.set(fp, null);
+  let r;
+  try {
+    r = await api(`/api/discs?disc=${encodeURIComponent(fp)}`);
+  } catch (e) {
+    return; // no history, or none for this disc: the panel simply offers a check
+  }
+  const disc = (r.discs || [])[0];
+  const scans = (disc && disc.scans) || [];
+  const last = scans[scans.length - 1];
+  if (!last || !last.result) return;
+  state.storedScans.set(fp, {
+    id: `stored:${last.jobId}`,
+    kind: 'scan',
+    state: 'done',
+    started: last.scannedAt,
+    done: 0,
+    total: 0,
+    scan: last.result,
+    fromHistory: true,
+  });
+  if (state.detail && state.tab === 'check') {
+    forget('scan');
+    renderScanPanel(state.detail);
+  }
+}
+
+function gradeWord(grade) {
+  const known = ['pristine', 'good', 'worn', 'degraded', 'failing', 'unknown'];
+  return known.includes(grade) ? t(`grade.${grade}`) : grade;
+}
 
 function gradeClass(grade) {
   if (grade === 'failing' || grade === 'degraded') return 'grade bad';
@@ -954,11 +1003,9 @@ function gradeClass(grade) {
 function renderScanPanel(d) {
   const running = state.jobs.some((j) => j.kind === 'scan' && j.drive === d.id && j.state === 'running');
   setDisabled(el('btnScan'), !!d.busy || !d.disc || !d.disc.present);
-  setText(el('scanNote'), running
-    ? 'Reading every sector. This takes about as long as ripping the disc.'
-    : 'Counts the bytes the drive\u2019s error correction could not fix. A disc reads perfectly right up until it does not \u2014 this is what shows the decline while there is still time to copy it.');
+  setText(el('scanNote'), t(running ? 'check.running' : 'check.what'));
 
-  const job = latestScan(d.id);
+  const job = scanToShow(d);
   const r = job && job.scan;
   // While a scan runs this really does change every tick, and is redrawn.
   // A finished scan is drawn once and then left alone.
@@ -980,24 +1027,23 @@ function drawScan(job) {
   if (live) {
     // No grade while it is still reading: a verdict on half a disc is not
     // a verdict.
-    head.appendChild(text('span', 'checking', 'grade'));
+    head.appendChild(text('span', t('check.checking'), 'grade'));
     const pctDone = job.total > 0 ? Math.round((job.done / job.total) * 100) : 0;
     head.appendChild(text('span', `${pctDone}%`, 'mono muted'));
     const left = eta(job.etaSeconds);
     if (left) head.appendChild(text('span', left, 'muted'));
   } else {
-    head.appendChild(text('span', gradeWords[r.grade] || r.grade, gradeClass(r.grade)));
-    if (r.score > 0) head.appendChild(text('span', `${r.score} / 100`, 'mono muted'));
-    head.appendChild(text('span', `checked ${when(job.started)}`, 'muted'));
+    head.appendChild(text('span', gradeWord(r.grade), gradeClass(r.grade)));
+    if (r.score > 0) head.appendChild(text('span', t('check.score', { score: r.score }), 'mono muted'));
+    head.appendChild(text('span', t('check.checkedOn', { when: when(job.started) }), 'muted'));
+    if (job.fromHistory) head.appendChild(text('span', t('check.fromHistory'), 'muted'));
   }
   box.appendChild(head);
 
   if (!live) {
     box.appendChild(text('p', r.summary, '')).style.margin = '0 0 10px';
   } else {
-    const p = text('p', r.c2Supported
-      ? 'Counting the bytes the error correction could not fix, as it reads.'
-      : 'This disc reports no error flags, so the scan is looking for sectors that will not read at all.', 'muted');
+    const p = text('p', t(r.c2Supported ? 'check.liveC2' : 'check.liveNoC2'), 'muted');
     p.style.margin = '0 0 10px';
     p.style.fontSize = '12px';
     box.appendChild(p);
@@ -1009,10 +1055,10 @@ function drawScan(job) {
   // On a disc with no C2 the only marks are the last two, so the legend is
   // trimmed to what this scan could actually have found.
   const legend = r.c2Supported
-    ? [['s0', 'clean'], ['s1', 'a few repaired bytes'], ['s2', 'many'],
-       ['s3', 'heavy'], ['ss', 'the drive struggled'], ['sx', 'unreadable']]
-    : [['s0', 'read cleanly'], ['ss', 'the drive struggled'], ['sx', 'unreadable']];
-  if (live) legend.push(['sp', 'not read yet']);
+    ? [['s0', 'key.clean'], ['s1', 'key.few'], ['s2', 'key.many'],
+       ['s3', 'key.heavy'], ['ss', 'key.struggled'], ['sx', 'key.unreadable']]
+    : [['s0', 'key.readCleanly'], ['ss', 'key.struggled'], ['sx', 'key.unreadable']];
+  if (live) legend.push(['sp', 'key.notYet']);
   for (const [cls, label] of legend) {
     const sp = document.createElement('span');
     // The swatch takes the strip's own class, so one CSS rule paints both
@@ -1020,26 +1066,32 @@ function drawScan(job) {
     const sw = document.createElement('i');
     sw.className = cls;
     sp.appendChild(sw);
-    sp.appendChild(text('span', label));
+    sp.appendChild(text('span', t(label)));
     key.appendChild(sp);
   }
-  key.appendChild(text('span', 'left is the middle of the disc, right is the outer edge'));
+  key.appendChild(text('span', t('key.direction')));
   box.appendChild(key);
 
   const facts = document.createElement('dl');
   facts.style.marginTop = '12px';
   dl(facts, [
-    ['Sectors', r.sectors ? r.sectors.toLocaleString() : null],
-    ['Read so far', live && job.total > 0
-      ? `${Math.round((job.done / job.total) * 100)}% of the disc` : null],
-    ['With errors', r.c2Supported ? `${r.c2Sectors.toLocaleString()} (${pct(r.c2Sectors, r.sectors)})` : null],
-    ['Worst sector', r.c2Supported && r.c2Max ? `${r.c2Max} of 2352 bytes` : null],
-    ['Unreadable', r.unreadable ? r.unreadable.toLocaleString() : (r.unreadable === 0 ? 'none' : null)],
-    ['Where', (r.badRanges || []).length ? r.badRanges.slice(0, 6).join(', ') : null],
-    ['Read at', !live && r.avgKbps ? `${Math.round(r.avgKbps)} kB/s average, ${Math.round(r.minKbps)} at its slowest` : null],
-    ['Struggled', !live && r.slowStretches
-      ? `${r.slowStretches} stretch${r.slowStretches > 1 ? 'es' : ''}, ${r.slowBlocks} blocks` : null],
-    ['Took', !live && r.readSeconds ? duration(r.readSeconds) : null],
+    [t('check.sectors'), r.sectors ? r.sectors.toLocaleString(i18n.code) : null],
+    [t('check.readSoFar'), live && job.total > 0
+      ? t('check.percentOfDisc', { pct: Math.round((job.done / job.total) * 100) }) : null],
+    [t('check.withErrors'), r.c2Supported
+      ? `${r.c2Sectors.toLocaleString(i18n.code)} (${pct(r.c2Sectors, r.sectors)})` : null],
+    [t('check.worstSector'), r.c2Supported && r.c2Max ? t('check.ofBytes', { n: r.c2Max }) : null],
+    [t('check.unreadable'), r.unreadable
+      ? r.unreadable.toLocaleString(i18n.code) : (r.unreadable === 0 ? t('check.noneUnreadable') : null)],
+    [t('check.where'), (r.badRanges || []).length ? r.badRanges.slice(0, 6).join(', ') : null],
+    [t('check.readAt'), !live && r.avgKbps
+      ? t('check.readRate', { avg: Math.round(r.avgKbps), min: Math.round(r.minKbps) }) : null],
+    [t('check.struggled'), !live && r.slowStretches
+      ? t('check.struggledValue', {
+          stretches: tn('check.stretches', r.slowStretches),
+          blocks: tn('check.blocks', r.slowBlocks),
+        }) : null],
+    [t('check.took'), !live && r.readSeconds ? duration(r.readSeconds) : null],
   ]);
   box.appendChild(facts);
 
@@ -1067,8 +1119,8 @@ function strip(map, scanned) {
   box.setAttribute('role', 'img');
   const read = scanned === undefined ? (map || []).length : scanned;
   box.setAttribute('aria-label', read < (map || []).length
-    ? `where the errors are so far; ${Math.round((read / map.length) * 100)}% of the disc read`
-    : 'where on the disc the errors are');
+    ? t('check.stripPartial', { pct: Math.round((read / map.length) * 100) })
+    : t('check.stripWhole'));
   (map || []).forEach((v, i) => {
     const cell = document.createElement('i');
     cell.className = i >= read ? 'sp'
@@ -1086,9 +1138,7 @@ async function loadDiscs() {
     const r = await api('/api/discs');
     state.discs = r.discs || [];
     el('discsPanel').hidden = !r.enabled || state.discs.length === 0;
-    el('discsNote').textContent = r.enabled
-      ? 'Kept in the database, so a disc checked today can be compared with the same disc checked next year. A disc is recognised by its table of contents, not by its name.'
-      : '';
+    el('discsNote').textContent = r.enabled ? t('discs.note') : '';
     renderDiscs();
   } catch (e) { /* the history is not worth an error banner over */ }
 }
@@ -1096,8 +1146,7 @@ async function loadDiscs() {
 function renderDiscs() {
   const box = el('discs');
   box.textContent = '';
-  setText(el('discsSummary'), state.discs.length === 1
-    ? '1 disc checked before' : `${state.discs.length} discs checked before`);
+  setText(el('discsSummary'), tn('discs.count', state.discs.length));
   for (const d of state.discs) {
     const row = document.createElement('div');
     row.className = 'job';
@@ -1105,8 +1154,8 @@ function renderDiscs() {
     const head = document.createElement('div');
     head.className = 'top';
     head.appendChild(text('span', d.label || d.disc, 'what'));
-    head.appendChild(text('span', gradeWords[d.latestGrade] || d.latestGrade, gradeClass(d.latestGrade)));
-    head.appendChild(text('span', `${d.scans.length} check${d.scans.length > 1 ? 's' : ''}`, 'muted'));
+    head.appendChild(text('span', gradeWord(d.latestGrade), gradeClass(d.latestGrade)));
+    head.appendChild(text('span', tn('discs.checks', d.scans.length), 'muted'));
     row.appendChild(head);
 
     const note = text('p', d.trendNote, 'meta' + (d.trend === 'worse' ? ' trend worse' : ''));
@@ -1146,9 +1195,8 @@ function openArchiveDialog(purpose) {
   // Named the same way a rip is: left alone it takes the name of what it
   // came from, and the extension is added for you either way.
   el('archiveName').value = '';
-  el('archiveName').placeholder = purpose.suggest || 'taken from the disc';
-  el('archiveNameNote').textContent = purpose.nameNote
-    || 'Letters of any script, digits, spaces. The extension is added for you.';
+  el('archiveName').placeholder = purpose.suggest || t('archive.takenFromDisc');
+  el('archiveNameNote').textContent = purpose.nameNote || t('archive.nameNote');
   renderWhere(purpose.where || 'browser');
 
   // One file is written as itself, so there is no format to choose and the
@@ -1189,14 +1237,16 @@ function chosenFormat() {
 // and on a laptop over wifi it is the one that finishes - so it is offered
 // beside it rather than hidden in the rip panel.
 const destinations = [
-  ['browser', 'This browser', 'Sent to the machine you are looking at, as a normal download.'],
-  ['store', 'The image store', 'Written on the server, beside the rips. Nothing crosses the network twice.'],
+  ['browser', 'archive.toBrowser', 'archive.toBrowserWhy'],
+  ['store', 'archive.toStore', 'archive.toStoreWhy'],
 ];
 
 function renderWhere(initial) {
   const box = el('archiveWhere');
   box.textContent = '';
-  for (const [id, name, why] of destinations) {
+  for (const [id, nameKey, whyKey] of destinations) {
+    const name = t(nameKey);
+    const why = t(whyKey);
     const label = document.createElement('label');
     const radio = document.createElement('input');
     radio.type = 'radio';
@@ -1210,7 +1260,7 @@ function renderWhere(initial) {
       // A file going to the store is written by a job, which shows up in
       // the job list; say so while the choice is still being made.
       el('archiveGo').textContent = id === 'store'
-        ? 'Save' : (state.archiveFor ? state.archiveFor.action : 'Download');
+        ? t('common.save') : (state.archiveFor ? state.archiveFor.action : t('common.download'));
     });
     label.appendChild(radio);
     const body = document.createElement('span');
@@ -1253,19 +1303,19 @@ function drawAppendBox(d, free) {
   setHidden(el('appendBlocked'), !blocked);
   setHidden(el('appendFields'), blocked);
   if (blocked) {
-    setText(el('appendBlocked'), d.appendBlocker || 'Files cannot be added to this disc.');
+    setText(el('appendBlocked'), d.appendBlocker || t('add.blocked'));
     return;
   }
 
   const matched = matching(state.images, el('appendFilter').value);
   const shown = matched.slice(0, imagePage);
-  setText(el('appendCount'), countLine(shown.length, matched.length, state.images.length, 'images'));
+  setText(el('appendCount'), countLine(shown.length, matched.length, state.images.length));
   sync(el('appendRows'), shown, (f) => f.name, (f) => {
     const tr = document.createElement('tr');
     const tick = document.createElement('td');
     const box = document.createElement('input');
     box.type = 'checkbox';
-    box.setAttribute('aria-label', `add ${f.name}`);
+    box.setAttribute('aria-label', t('add.tick', { name: f.name }));
     box.addEventListener('change', () => {
       if (box.checked) appendPicked.add(f.name); else appendPicked.delete(f.name);
       updateAppend((state.detail && state.detail.disc && state.detail.disc.writableBytes) || 0);
@@ -1304,10 +1354,8 @@ function updateAppend(free) {
   const fits = want + overhead <= free;
   el('btnAppend').disabled = picked === 0 || !fits;
   el('appendRoom').textContent = picked === 0
-    ? `${bytes(free)} free on this disc. Tick what to add.`
-    : fits
-      ? `${bytes(want)} selected, ${bytes(free)} free.`
-      : `${bytes(want)} selected, which will not fit in the ${bytes(free)} left.`;
+    ? t('add.roomEmpty', { free: bytes(free) })
+    : t(fits ? 'add.roomFits' : 'add.roomTooBig', { want: bytes(want), free: bytes(free) });
 }
 
 /* ---------- files ---------- */
@@ -1317,8 +1365,7 @@ function renderFilesTab(d) {
   el('filesNone').hidden = can;
   el('filesBody').hidden = !can;
   if (!can) {
-    el('filesNone').textContent = d.browseError ||
-      'This disc has no filesystem ripperX can read. An audio CD has none at all; a disc written only in UDF is not supported.';
+    el('filesNone').textContent = d.browseError || t('files.noFilesystem');
   }
 }
 
@@ -1329,13 +1376,67 @@ async function loadDir(path) {
     const r = await api(`/api/drives/${encodeURIComponent(id)}/browse?path=${encodeURIComponent(path)}`);
     state.path = r.path;
     state.entries = r.entries;
+    state.browse = r;
     fail('');
     renderFiles(r);
   } catch (e) {
     state.entries = [];
+    state.browse = null;
     el('fileRows').textContent = '';
     fail(String(e.message || e));
   }
+}
+
+// measureDirs asks what is under one or more folders. It is a button rather
+// than part of the listing because the answer costs a walk of the whole
+// subtree - every directory record in it, one seek each - and doing that for
+// every row of every listing would make browsing a disc unusable. Once
+// asked, the answer is kept for as long as the disc is in the drive.
+async function measureDirs(paths) {
+  const id = state.selected;
+  const wanted = paths.filter((p) => !state.dirSizes.has(p));
+  if (!id || wanted.length === 0) return;
+  const btn = el('btnSizes');
+  setDisabled(btn, true);
+  setText(btn, t('files.measuring'));
+  try {
+    const query = wanted.map((p) => `path=${encodeURIComponent(p)}`).join('&');
+    const r = await api(`/api/drives/${encodeURIComponent(id)}/sizes?${query}`);
+    for (const size of r.sizes || []) state.dirSizes.set(size.path, size);
+    fail('');
+  } catch (e) {
+    fail(String(e.message || e));
+  }
+  setDisabled(btn, false);
+  setText(btn, t('files.measure'));
+  if (state.browse) renderFiles(state.browse);
+}
+
+// folderSizeCell is what goes in the Size column for a directory: the figure
+// once it is known, and the offer to work it out until then.
+function folderSizeCell(e) {
+  const td = document.createElement('td');
+  td.className = 'num';
+  const known = state.dirSizes.get(e.path);
+  if (known && !known.error) {
+    td.appendChild(text('span', bytes(known.bytes)));
+    td.title = t('files.folderHolds', {
+      files: tn('files.fileCount', known.files),
+      dirs: tn('files.folderCount', known.dirs),
+    });
+    return td;
+  }
+  if (known && known.error) {
+    td.appendChild(text('span', '-', 'muted'));
+    td.title = known.error;
+    return td;
+  }
+  const b = text('button', t('files.measureOne'), 'link');
+  b.type = 'button';
+  b.title = t('files.measureWhy');
+  b.addEventListener('click', () => measureDirs([e.path]));
+  td.appendChild(b);
+  return td;
 }
 
 function renderFiles(r) {
@@ -1344,7 +1445,7 @@ function renderFiles(r) {
   const bc = el('bread');
   bc.textContent = '';
   const parts = r.path === '/' ? [] : r.path.replace(/^\//, '').split('/');
-  const root = text('button', r.volume.volumeId || 'disc', 'link');
+  const root = text('button', r.volume.volumeId || t('files.discRoot'), 'link');
   root.type = 'button';
   root.addEventListener('click', () => loadDir('/'));
   bc.appendChild(root);
@@ -1365,6 +1466,10 @@ function renderFiles(r) {
 
   el('btnUp').disabled = !r.parent;
   el('btnUp').onclick = () => loadDir(r.parent || '/');
+  // Nothing to measure in a listing with no folders in it, or one whose
+  // folders have all been measured already.
+  setDisabled(el('btnSizes'),
+    !r.entries.some((e) => e.isDir && !state.dirSizes.has(e.path)));
 
   const rows = el('fileRows');
   rows.textContent = '';
@@ -1382,7 +1487,7 @@ function fileRow(id, e) {
   const box = document.createElement('input');
   box.type = 'checkbox';
   box.checked = state.picked.has(e.path);
-  box.setAttribute('aria-label', `rip ${e.name}`);
+  box.setAttribute('aria-label', t('files.tick', { name: e.name }));
   box.addEventListener('change', () => {
     if (box.checked) state.picked.add(e.path); else state.picked.delete(e.path);
     updatePicked();
@@ -1403,7 +1508,7 @@ function fileRow(id, e) {
   }
   tr.appendChild(nameCell);
 
-  tr.appendChild(text('td', e.isDir ? '' : bytes(e.size), 'num'));
+  tr.appendChild(e.isDir ? folderSizeCell(e) : text('td', bytes(e.size), 'num'));
   tr.appendChild(text('td', when(e.modTime), 'num drop-col'));
 
   const act = document.createElement('td');
@@ -1411,7 +1516,7 @@ function fileRow(id, e) {
   if (!e.isDir) {
     const file = `/api/drives/${encodeURIComponent(id)}/file?path=${encodeURIComponent(e.path)}`;
     if (e.playable) {
-      const play = text('button', 'Play');
+      const play = text('button', t('files.play'));
       play.type = 'button';
       play.addEventListener('click', () => togglePlayer(tr, e, file));
       act.appendChild(play);
@@ -1420,28 +1525,28 @@ function fileRow(id, e) {
     // the image store, and either way it can be called something else on
     // the way out - and that is the same question for a file, a folder and
     // a ticked selection, so it is the same dialog.
-    const take = text('button', 'Take\u2026');
+    const take = text('button', t('files.take'));
     take.type = 'button';
-    take.title = 'Download it, or write it into the image store';
+    take.title = t('files.takeWhy');
     take.addEventListener('click', () => openArchiveDialog({
-      title: 'Take this file',
+      title: t('files.takeFileTitle'),
       what: `${e.path} \u2014 ${bytes(e.size)}.`,
-      action: 'Download',
+      action: t('common.download'),
       suggest: e.name,
       noFormat: true,
-      nameNote: 'Left empty it keeps the name it has on the disc.',
+      nameNote: t('files.keepsItsName'),
       run: (format, where, name) => where === 'store'
         ? startRip('files', { paths: [e.path], name })
         : downloadDiscFile(id, e.path, name),
     }));
     act.appendChild(take);
   } else {
-    const b = text('button', 'Download\u2026');
+    const b = text('button', t('files.download'));
     b.type = 'button';
     b.addEventListener('click', () => openArchiveDialog({
-      title: 'Take this folder',
-      what: `${e.path} \u2014 everything under it, as one archive.`,
-      action: 'Download',
+      title: t('files.takeFolderTitle'),
+      what: t('files.takeFolderWhat', { path: e.path }),
+      action: t('common.download'),
       suggest: e.name,
       run: (format, where, name) => takeFolder(id, e.path, format, where, name),
     }));
@@ -1469,7 +1574,7 @@ function togglePlayer(tr, e, url) {
   media.src = url + '&inline=1';
   if (video) { media.style.width = '100%'; media.style.maxWidth = '640px'; }
   cell.appendChild(media);
-  const note = text('p', `${e.type} · streamed from the disc; seeking seeks the laser.`, 'muted');
+  const note = text('p', `${e.type} · ${t('files.streamNote')}`, 'muted');
   note.style.fontSize = '11px';
   note.style.margin = '6px 0 0';
   cell.appendChild(note);
@@ -1510,8 +1615,7 @@ function downloadPicked(name) {
     downloadDiscFile(state.selected, paths[0], name);
     return;
   }
-  fail('A browser download takes one file or one whole folder at a time. Tick a single file, ' +
-    'use Download on the folder itself, or save the selection to the image store.');
+  fail(t('files.oneAtATime'));
 }
 
 function downloadDiscFile(id, path, name) {
@@ -1522,19 +1626,18 @@ function downloadDiscFile(id, path, name) {
 function updatePicked() {
   const n = state.picked.size;
   el('btnRipSel').disabled = n === 0;
-  el('selNote').textContent = n === 0 ? '' :
-    `${n} selected${n > 1 ? ' - they will be written as one .tar' : ''}`;
+  el('selNote').textContent = n === 0 ? '' : tn('files.selected', n);
 }
 
 /* ---------- audio ---------- */
 
 function renderAudioTab(d) {
-  const tracks = (d.disc && d.disc.tracks || []).filter((t) => t.audio);
+  const tracks = (d.disc && d.disc.tracks || []).filter((tr) => tr.audio);
   // Rebuilding this rebuilt the <audio> elements, which stopped whatever was
   // playing and lost its position - twice a second, for as long as the tab
   // was open.
   memo('audio', [d.id, d.canRipAudio, d.disc && d.disc.present,
-    tracks.map((t) => `${t.number}:${t.durationSeconds}`).join('|')],
+    tracks.map((x) => `${x.number}:${x.durationSeconds}`).join('|')],
     () => drawAudioTab(d, tracks));
 }
 
@@ -1543,9 +1646,7 @@ function drawAudioTab(d, tracks) {
   setHidden(el('audioNone'), can);
   setHidden(el('audioBody'), !can);
   if (!can) {
-    setText(el('audioNone'), d.disc && d.disc.present
-      ? 'There are no audio tracks on this disc.'
-      : 'There is no disc in this drive.');
+    setText(el('audioNone'), t(d.disc && d.disc.present ? 'audio.noTracks' : 'audio.noDisc'));
     return;
   }
   const id = d.id;
@@ -1554,17 +1655,17 @@ function drawAudioTab(d, tracks) {
 
   const rows = el('trackRows');
   rows.textContent = '';
-  for (const t of tracks) {
+  for (const track of tracks) {
     const tr = document.createElement('tr');
-    tr.appendChild(text('td', `Track ${String(t.number).padStart(2, '0')}` +
-      (t.preEmphasis ? ' (pre-emphasis)' : '')));
-    tr.appendChild(text('td', duration(t.durationSeconds), 'num'));
+    tr.appendChild(text('td', t('audio.trackNumber', { n: String(track.number).padStart(2, '0') }) +
+      (track.preEmphasis ? ` ${t('audio.preEmphasis')}` : '')));
+    tr.appendChild(text('td', duration(track.durationSeconds), 'num'));
 
     const play = document.createElement('td');
     const audio = document.createElement('audio');
     audio.controls = true;
     audio.preload = 'none';
-    audio.src = `/api/drives/${encodeURIComponent(id)}/audio/${t.number}.wav`;
+    audio.src = `/api/drives/${encodeURIComponent(id)}/audio/${track.number}.wav`;
     play.appendChild(audio);
     tr.appendChild(play);
 
@@ -1573,7 +1674,7 @@ function drawAudioTab(d, tracks) {
     const a = document.createElement('a');
     a.className = 'btn';
     a.href = audio.src;
-    a.textContent = 'Download .wav';
+    a.textContent = t('audio.downloadWav');
     act.appendChild(a);
     tr.appendChild(act);
     rows.appendChild(tr);
@@ -1594,20 +1695,20 @@ function drawDriveTab(d) {
     el('driveFacts').textContent = '';
     el('can').textContent = '';
     el('cannot').textContent = '';
-    el('capNotes').textContent = d.error || 'This drive has not said what it is.';
+    el('capNotes').textContent = d.error || t('drive.silent');
     return;
   }
-  const x = (kb) => (kb ? `${(kb / 176).toFixed(0)}x (${kb} kB/s)` : null);
+  const x = (kb) => (kb ? `${(kb / 176).toFixed(0)}x (${kb} ${t('unit.kbps')})` : null);
   dl(el('driveFacts'), [
-    ['Model', `${c.info.vendor} ${c.info.product}`],
-    ['Firmware', c.info.version],
-    ['Serial', c.serialNumber || null],
-    ['Loading', c.loadingMechanism],
-    ['Buffer', c.bufferKb ? `${c.bufferKb} kB` : null],
-    ['Reads up to', x(c.maxReadSpeedKb)],
-    ['Reading at', x(c.currentReadSpeedKb)],
-    ['Writes up to', x(c.maxWriteSpeedKb)],
-    ['In the drive', c.currentProfileName],
+    [t('drive.model'), `${c.info.vendor} ${c.info.product}`],
+    [t('drive.firmware'), c.info.version],
+    [t('drive.serial'), c.serialNumber || null],
+    [t('drive.loading'), c.loadingMechanism],
+    [t('drive.buffer'), c.bufferKb ? `${c.bufferKb} ${t('unit.kb')}` : null],
+    [t('drive.readsUpTo'), x(c.maxReadSpeedKb)],
+    [t('drive.readingAt'), x(c.currentReadSpeedKb)],
+    [t('drive.writesUpTo'), x(c.maxWriteSpeedKb)],
+    [t('drive.inTheDrive'), c.currentProfileName],
   ]);
 
   const fill = (node, list) => {
@@ -1632,9 +1733,16 @@ function renderJobs() {
   sync(el('jobs'), running, (j) => j.id, createJob, updateJob);
 
   setHidden(el('doneMore'), done.length === 0);
-  setText(el('doneSummary'), done.length === 1 ? '1 finished job'
-    : `${done.length} finished jobs`);
+  setText(el('doneSummary'), tn('jobs.finished', done.length));
   sync(el('doneJobs'), done, (j) => j.id, createJob, updateJob);
+}
+
+// jobState is the one word a job's state is shown as. The server's own
+// vocabulary is the key rather than the text, so a page in another language
+// does not show four English words among its own.
+function jobState(state) {
+  const known = ['running', 'done', 'failed', 'cancelled'];
+  return known.includes(state) ? t(`jobs.state.${state}`) : state;
 }
 
 // A job is built once and then only written into. Its shape does not depend
@@ -1649,7 +1757,7 @@ function createJob(j) {
   top.className = 'top';
   top.appendChild(text('span', '', 'what'));
   top.appendChild(text('span', '', 'pct'));
-  const stop = text('button', 'Stop');
+  const stop = text('button', t('jobs.stop'));
   stop.type = 'button';
   stop.className = 'stop';
   stop.addEventListener('click', async () => {
@@ -1686,22 +1794,23 @@ function updateJob(div, j) {
   setClass(bar, 'bad', j.state === 'failed');
   const share = j.total > 0 ? Math.min(100, (j.done / j.total) * 100) : 0;
   setWidth(bar.firstChild, `${share.toFixed(1)}%`);
-  setText(div.querySelector('.pct'), j.total > 0 ? `${Math.round(share)}%` : j.state);
+  setText(div.querySelector('.pct'), j.total > 0 ? `${Math.round(share)}%` : jobState(j.state));
 
   const bits = [];
   if (j.phase) bits.push(j.phase);
-  if (j.total > 0) bits.push(`${bytes(j.done)} of ${bytes(j.total)}`);
+  if (j.total > 0) bits.push(t('jobs.ofTotal', { done: bytes(j.done), total: bytes(j.total) }));
   if (j.bytesPerSec > 0) bits.push(rate(j.bytesPerSec));
   if (running) {
-    bits.push(`${since(j.started)} so far`);
+    bits.push(t('jobs.soFar', { elapsed: since(j.started) }));
     const left = eta(j.etaSeconds);
     if (left) bits.push(left);
   } else {
-    bits.push(`${j.state} · ${when(j.started)}`);
+    bits.push(`${jobState(j.state)} · ${when(j.started)}`);
   }
   if (j.badSectors > 0) {
-    bits.push(`${j.badSectors} unreadable sector${j.badSectors > 1 ? 's' : ''}` +
-      (j.badRanges && j.badRanges.length ? ` at ${j.badRanges.slice(0, 4).join(', ')}` : ''));
+    bits.push(tn('jobs.unreadable', j.badSectors) +
+      (j.badRanges && j.badRanges.length
+        ? ' ' + t('jobs.atRanges', { ranges: j.badRanges.slice(0, 4).join(', ') }) : ''));
   }
   setText(div.querySelector('.meta'), bits.join(' · '));
 
@@ -1715,13 +1824,14 @@ function updateJob(div, j) {
 
   const sum = div.querySelector('.sum');
   setText(sum, j.sha256 ? `SHA-256 ${j.sha256}` : '');
+
   setHidden(sum, !j.sha256);
 
-  sync(div.querySelector('.targets'), j.targets || [], (t) => t, (t) => {
+  sync(div.querySelector('.targets'), j.targets || [], (name) => name, (name) => {
     const a = document.createElement('a');
     a.className = 'btn';
-    a.href = `/api/images/${encodeURIComponent(t)}`;
-    a.textContent = t;
+    a.href = `/api/images/${encodeURIComponent(name)}`;
+    a.textContent = name;
     return a;
   }, () => {});
 }
@@ -1737,10 +1847,10 @@ function upperFirst(s) {
 // and one whose names were flattened to 8.3 by its author. UDF has no such
 // distinction: it has had real names since it was written.
 function namingScheme(vol) {
-  if (vol.format === 'UDF') return 'UDF, any script';
+  if (vol.format === 'UDF') return t('names.udf');
   if (vol.joliet) return 'Joliet';
   if (vol.rockRidge) return 'Rock Ridge';
-  return 'ISO 9660 only';
+  return t('names.isoOnly');
 }
 
 async function loadISOs() {
@@ -1788,14 +1898,16 @@ function matching(files, query) {
 
 // countLine says what is being shown out of what there is, which is the
 // thing a filter has to say or nobody trusts it.
-function countLine(shown, matched, total, what) {
+function countLine(shown, matched, total) {
   if (total === 0) return '';
   if (matched < total) {
     return shown < matched
-      ? `${shown} of ${matched} matching, ${total} ${what} in all`
-      : `${matched} of ${total} ${what}`;
+      ? t('count.shownOfMatching', { shown, matched, total })
+      : t('count.matchingOfTotal', { matched, total });
   }
-  return shown < total ? `${shown} of ${total} ${what}` : `${total} ${what}`;
+  return shown < total
+    ? t('count.shownOfTotal', { shown, total })
+    : tn('count.total', total);
 }
 
 // A dual-layer rip is 8 GB and a share fills as quietly as a disk does. The
@@ -1814,8 +1926,8 @@ function renderSpace(r) {
   setWidth(meter.firstChild, `${share.toFixed(1)}%`);
   setClass(meter, 'low', low);
   setClass(el('storeFree'), 'low', low);
-  setText(el('storeFree'), `${bytes(r.free)} free of ${bytes(r.total)}` +
-    (low ? ' \u2014 not enough for a full disc' : ''));
+  setText(el('storeFree'), t('images.freeOf', { free: bytes(r.free), total: bytes(r.total) }) +
+    (low ? ` \u2014 ${t('images.lowSpace')}` : ''));
 }
 
 function renderImages() {
@@ -1825,9 +1937,9 @@ function renderImages() {
 
   const matched = matching(state.images, el('imageFilter').value);
   const shown = state.imagesAll ? matched : matched.slice(0, imagePage);
-  setText(el('imageCount'), countLine(shown.length, matched.length, state.images.length, 'images'));
+  setText(el('imageCount'), countLine(shown.length, matched.length, state.images.length));
   setHidden(el('imageMore'), state.imagesAll || matched.length <= shown.length);
-  setText(el('imageMore'), `Show the other ${matched.length - shown.length}`);
+  setText(el('imageMore'), t('images.showOther', { n: matched.length - shown.length }));
 
   for (const f of shown) {
     const tr = document.createElement('tr');
@@ -1840,13 +1952,13 @@ function renderImages() {
     const a = document.createElement('a');
     a.className = 'btn';
     a.href = `/api/images/${encodeURIComponent(f.name)}`;
-    a.textContent = 'Download';
+    a.textContent = t('common.download');
     act.appendChild(a);
 
     // A raw image can be turned into something burnable without going back
     // to the disc, which is the only reason this button is here.
     if (f.size % 2352 === 0 && f.size % 2048 !== 0) {
-      const conv = text('button', 'To .iso');
+      const conv = text('button', t('images.toIso'));
       conv.type = 'button';
       conv.addEventListener('click', async () => {
         conv.disabled = true;
@@ -1856,14 +1968,14 @@ function renderImages() {
       act.appendChild(conv);
     }
 
-    const del = text('button', 'Delete');
+    const del = text('button', t('common.delete'));
     del.type = 'button';
     del.addEventListener('click', async () => {
       const yes = await ask({
-        title: 'Delete this image',
+        title: t('images.deleteTitle'),
         what: `${f.name} \u2014 ${bytes(f.size)}`,
-        action: 'Delete it',
-        danger: 'It is removed from the store. This cannot be undone.',
+        action: t('images.deleteGo'),
+        danger: t('images.deleteWarn'),
       });
       if (!yes) return;
       del.disabled = true;
@@ -1891,7 +2003,7 @@ function upload(file) {
   const fillBar = bar.querySelector('i');
   bar.hidden = false;
   el('upNote').hidden = false;
-  el('upNote').textContent = `uploading ${file.name}`;
+  el('upNote').textContent = t('upload.uploading', { name: file.name });
 
   xhr.upload.addEventListener('progress', (ev) => {
     if (ev.lengthComputable) fillBar.style.width = `${(ev.loaded / ev.total) * 100}%`;
@@ -1903,15 +2015,15 @@ function upload(file) {
     let body = null;
     try { body = JSON.parse(xhr.responseText); } catch (e) { /* not JSON */ }
     if (xhr.status >= 400) {
-      el('upNote').textContent = (body && body.error) || `upload failed: HTTP ${xhr.status}`;
+      el('upNote').textContent = (body && body.error) || t('upload.failedStatus', { status: xhr.status });
       return;
     }
-    el('upNote').textContent = `${body.file.name} stored · SHA-256 ${body.sha256}`;
+    el('upNote').textContent = t('upload.stored', { name: body.file.name, sum: body.sha256 });
     await loadImages();
   });
   xhr.addEventListener('error', () => {
     bar.hidden = true;
-    el('upNote').textContent = 'the upload did not finish';
+    el('upNote').textContent = t('upload.unfinished');
   });
   xhr.open('POST', '/api/upload');
   xhr.send(form);
@@ -1931,6 +2043,13 @@ async function startRip(kind, extra) {
   if (kind === 'iso') body.length = el('ripLength').value;
   try {
     await post('/api/rip', body);
+    // The name box is emptied once it has been used. A name that was typed
+    // is used exactly as it is, which means no date is added to it - so a
+    // name left sitting in the box silently became the name of every later
+    // rip too, and the dates that keep two rips of one disc apart stopped
+    // appearing. Emptying it puts the next rip back on the disc's own name
+    // and today's date unless somebody says otherwise again.
+    if (!extra || extra.name === undefined) el('ripName').value = '';
     fail('');
   } catch (e) {
     fail(String(e.message || e));
@@ -1953,22 +2072,25 @@ function wireActions() {
       return;
     }
     openArchiveDialog({
-      title: 'Take what is ticked',
-      what: `${n} selected items, wrapped in one archive.`,
-      action: 'Save',
+      title: t('files.takeTickedTitle'),
+      what: tn('files.takeTickedWhat', n),
+      action: t('common.save'),
       where: 'store',
-      suggest: 'taken from the disc\u2019s label',
+      suggest: t('archive.fromDiscLabel'),
       run: (format, where, name) => where === 'store'
         ? startRip('files', { paths: Array.from(state.picked), format, name })
         : downloadPicked(name),
     });
   });
 
+  el('btnSizes').addEventListener('click', () =>
+    measureDirs(state.entries.filter((e) => e.isDir).map((e) => e.path)));
+
   el('btnArchive').addEventListener('click', () => openArchiveDialog({
-    title: 'Take this folder',
-    what: `${state.path} \u2014 everything under it, as one archive.`,
-    action: 'Download',
-    suggest: state.path === '/' ? 'the disc\u2019s label' : state.path.split('/').pop(),
+    title: t('files.takeFolderTitle'),
+    what: t('files.takeFolderWhat', { path: state.path }),
+    action: t('common.download'),
+    suggest: state.path === '/' ? t('archive.fromDiscLabel') : state.path.split('/').pop(),
     run: (format, where, name) => takeFolder(state.selected, state.path, format, where, name),
   }));
 
@@ -2024,24 +2146,27 @@ function wireActions() {
     if (!d || !image) return;
     const dummy = el('burnDummy').checked;
     const unpack = isArchiveName(image);
-    let title = 'Burn this disc';
-    let danger = 'Whatever is on the disc now is gone. This cannot be undone.';
-    let what = `${image}\n\nto the disc in ${d.id}`;
+    let title = t('burn.confirmTitle');
+    let danger = t('burn.confirmWarn');
+    let what = t('burn.confirmWhat', { image, drive: d.id });
     if (unpack) {
-      title = 'Write these files to a disc';
-      what = `The files inside ${image}\n\nto the disc in ${d.id}`;
-      danger = 'The disc will hold the files, not the archive. This cannot be undone.';
+      title = t('burn.unpackTitle');
+      what = t('burn.unpackWhat', { image, drive: d.id });
+      danger = t('burn.unpackWarn');
     } else if (dummy) {
-      title = 'Rehearse this burn';
+      title = t('burn.rehearseTitle');
       danger = '';
-      what = `${image}\n\nThe laser stays off and the disc is untouched.`;
+      what = t('burn.rehearseWhat', { image });
     }
     // If it will not boot, say so here rather than after the disc is spent.
     const info = state.burnInfo;
     if (!dummy && info && info.boot && !info.boot.bootable) {
-      danger += `\n${upperFirst(info.boot.why || 'This image will not boot.')}`;
+      danger += `\n${upperFirst(info.boot.why || t('burn.willNotBoot'))}`;
     }
-    const yes = await ask({ title, what, action: dummy ? 'Rehearse' : 'Burn it', danger });
+    const yes = await ask({
+      title, what, danger,
+      action: t(dummy ? 'burn.rehearseGo' : 'burn.go2'),
+    });
     if (!yes) return;
     try {
       await post('/api/burn', {
@@ -2064,13 +2189,10 @@ function wireActions() {
     const folder = el('appendFolder').value.trim();
     const closing = el('appendClose').checked;
     const yes = await ask({
-      title: 'Add to this disc',
-      what: `${names.length} file${names.length > 1 ? 's' : ''} to the disc in ${d.id}.\n` +
-        'Nothing already on it is erased.',
-      action: 'Add them',
-      danger: closing
-        ? 'The disc will then be closed, and nothing can ever be added to it again. That cannot be undone.'
-        : '',
+      title: t('add.confirmTitle'),
+      what: tn('add.confirmWhat', names.length, { drive: d.id }),
+      action: t('add.confirmGo'),
+      danger: closing ? t('add.confirmClose') : '',
     });
     if (!yes) return;
     try {
@@ -2090,10 +2212,10 @@ function wireActions() {
     const d = state.detail;
     if (!d) return;
     const yes = await ask({
-      title: 'Erase this disc',
-      what: `The disc in ${d.id}.`,
-      action: 'Erase it',
-      danger: 'Everything on it is lost. This cannot be undone.',
+      title: t('erase.title'),
+      what: t('erase.what', { drive: d.id }),
+      action: t('erase.go'),
+      danger: t('erase.warn'),
     });
     if (!yes) return;
     try { await post('/api/erase', { drive: d.id }); fail(''); }
@@ -2168,6 +2290,9 @@ function watchJobsForImages() {
   if (changed) {
     loadImages();
     loadDiscs();
+    // A scan that has just finished makes whatever the database said stale.
+    state.storedScans.clear();
+    loadStoredScan();
   }
 }
 
@@ -2175,8 +2300,8 @@ function connect() {
   const es = new EventSource('/api/events');
   es.addEventListener('open', () => {
     el('conn').className = 'conn live';
-    setText(el('conn'), 'live');
-    el('conn').title = 'Every browser watching this server sees the same drives and the same jobs.';
+    setText(el('conn'), t('conn.live'));
+    el('conn').title = t('conn.liveWhy');
   });
   es.addEventListener('message', (ev) => {
     try {
@@ -2187,11 +2312,33 @@ function connect() {
   });
   es.addEventListener('error', () => {
     el('conn').className = 'conn off';
-    setText(el('conn'), 'reconnecting');
+    setText(el('conn'), t('conn.reconnecting'));
   });
 }
 
+// renderLanguages fills the menu from the locale files this build carries,
+// so a language added to the build appears here without anything else
+// changing. With only one installed there is nothing to choose and the menu
+// stays out of the way.
+function renderLanguages() {
+  const pick = el('lang');
+  const langs = i18n.languages;
+  setHidden(pick, langs.length < 2);
+  if (langs.length < 2) return;
+  pick.textContent = '';
+  for (const l of langs) {
+    const o = document.createElement('option');
+    o.value = l.code;
+    o.textContent = l.name;
+    pick.appendChild(o);
+  }
+  pick.value = i18n.code;
+  pick.addEventListener('change', () => i18n.choose(pick.value));
+}
+
 async function main() {
+  await i18n.start();
+  renderLanguages();
   wireActions();
   try {
     state.status = await api('/api/status');
@@ -2201,14 +2348,15 @@ async function main() {
   }
   const s = state.status;
   el('btnLogout').hidden = !s.authOn;
-  el('burnerFoot').textContent = s.burner ? `${s.burnerKind} (${s.burner})` : 'a burner program, once one is installed';
-  el('status').textContent =
-    `ripperX ${s.version} · ${s.drives} drive${s.drives === 1 ? '' : 's'} · ` +
-    `images in ${s.store}` +
-    (s.allowBurn ? ` · burning with ${s.burnerKind}` : ' · read only');
+  el('burnerFoot').textContent = s.burner ? `${s.burnerKind} (${s.burner})` : t('foot.noBurnerYet');
+  el('status').textContent = [
+    `ripperX ${s.version}`,
+    tn('app.driveCount', s.drives),
+    t('app.imagesIn', { store: s.store }),
+    s.allowBurn ? t('app.burningWith', { burner: s.burnerKind }) : t('app.readOnly'),
+  ].join(' · ');
   if (!s.allowBurn && s.burner === '') {
-    el('warning').textContent =
-      'No burner program is installed, so discs can be read but not written. Install xorriso to burn.';
+    el('warning').textContent = t('app.noBurner');
     el('warning').hidden = false;
   }
   el('storeFoot').textContent = s.store;
@@ -2217,3 +2365,4 @@ async function main() {
 }
 
 main();
+

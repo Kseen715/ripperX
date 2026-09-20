@@ -62,12 +62,23 @@ type server struct {
 	// firmware and architecture each one boots, and the disc it needs.
 	isoFacts *factCache
 
-	uploadMax   int64
+	uploadMax int64
+	// stageDir is where an image on a share is copied to before it is
+	// burned. It is never the system temporary directory by default,
+	// because that is a tmpfs on most machines and an image is bigger than
+	// the memory behind it.
+	stageDir    string
 	readSpeedKB int
 	allowBurn   bool
 	allowEject  bool
 	authOn      bool
 	startedAt   time.Time
+
+	// lang is the language this server serves by default, and languages
+	// every one it was built with. A browser may choose another; anything
+	// that language has no string for falls back to this one.
+	lang      string
+	languages []language
 
 	// web is the embedded page directory, and api the route table both the
 	// mux and the API document are built from.
@@ -97,6 +108,11 @@ func main() {
 		"let the page open and close the drive trays")
 	uploadMax := flag.Int64("upload-max", defaultUploadMax,
 		"largest image, in bytes, that may be uploaded to be burned")
+	stageDir := flag.String("stage-dir", "",
+		"directory to copy an image into before burning it, when the images are on a "+
+			"share; empty puts it beside the images when those are local, and falls back "+
+			"to the system temporary directory otherwise. Do not leave it on a tmpfs: an "+
+			"image is routinely larger than the machine's memory")
 	historyPath := flag.String("history", "",
 		"the SQLite file scans and finished jobs are recorded in; empty puts it beside "+
 			"the images when those are local, and in the working directory when they are on a share. "+
@@ -121,6 +137,9 @@ func main() {
 		"how long a login token is accepted for before it is renewed from the refresh token")
 	authRefreshTTL := flag.Duration("auth-refresh-ttl", defaultAuthRefreshTTL,
 		"how long a browser stays logged in without typing the password again")
+	lang := flag.String("lang", defaultLanguage,
+		"the language the page is shown in unless a browser asks for another, and the "+
+			"fallback for anything a translation has no words for yet")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
 
@@ -187,6 +206,11 @@ func main() {
 		}
 	}
 
+	stage := *stageDir
+	if stage == "" {
+		stage = defaultStageDir(st)
+	}
+
 	paths, err := discoverDrives(*devices)
 	if err != nil {
 		log.Fatal(err)
@@ -204,6 +228,7 @@ func main() {
 		isoFacts:    newFactCache(),
 		burner:      findBurner(*burnerPath),
 		uploadMax:   *uploadMax,
+		stageDir:    stage,
 		readSpeedKB: *readSpeed,
 		allowBurn:   *allowBurn,
 		allowEject:  *allowEject,
@@ -217,6 +242,11 @@ func main() {
 		log.Fatal(err)
 	}
 	s.web = sub
+	s.languages = readLanguages(sub)
+	if err := checkLanguage(*lang, s.languages); err != nil {
+		log.Fatal(err)
+	}
+	s.lang = *lang
 	s.api = s.routes(guard)
 
 	mux := http.NewServeMux()
@@ -249,6 +279,9 @@ func main() {
 	log.Printf("ripperX %s", version)
 	log.Printf("drives: %s", strings.Join(paths, ", "))
 	log.Printf("images: %s", st.Describe())
+	if st.Kind() != "local" {
+		log.Printf("staging for burns: %s", stage)
+	}
 	if isos != nil {
 		log.Printf("iso library: %s (read only)", isos.Describe())
 	}
@@ -267,6 +300,7 @@ func main() {
 	} else {
 		log.Printf("authentication: on, as %s", *authUser)
 	}
+	log.Printf("language: %s (%d installed)", s.lang, len(s.languages))
 	log.Printf("listening on http://%s", *addr)
 
 	// A drive left with its tray locked, or a job half-written, is worth
@@ -323,6 +357,18 @@ func methodGuard(rt route, h http.HandlerFunc) http.Handler {
 			Error: fmt.Sprintf("this endpoint takes %s, not %s",
 				strings.Join(allowed, " or "), r.Method)})
 	})
+}
+
+// defaultStageDir is where a burn stages an image from a share. Beside the
+// images when they are local; otherwise the system temporary directory,
+// which is only reached when the images are remote and nothing was
+// configured - and is the case the -stage-dir flag exists for, because on a
+// systemd machine that directory is RAM.
+func defaultStageDir(st store) string {
+	if local, ok := st.(*localStore); ok {
+		return local.dir
+	}
+	return os.TempDir()
 }
 
 // discoverDrives returns the device nodes to offer. An explicit list is
@@ -397,6 +443,7 @@ type statusResponse struct {
 	AuthOn      bool   `json:"authOn" doc:"whether a login is required"`
 	History     string `json:"history,omitempty" doc:"where scans and finished jobs are recorded, or empty when they are not"`
 	ISOStore    string `json:"isoStore,omitempty" doc:"the read-only library of images to burn from, when one is configured"`
+	StageDir    string `json:"stageDir,omitempty" doc:"where an image on a share is copied to before it is burned"`
 	UploadMax   int64  `json:"uploadMax" doc:"largest upload accepted, in bytes"`
 	ReadSpeedKB int    `json:"readSpeedKb" doc:"read speed cap applied to every rip, or 0 for the drive's own"`
 	Uptime      string `json:"uptime" doc:"how long this server has been running"`
@@ -411,6 +458,7 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		AllowBurn:   s.allowBurn && s.burner != nil,
 		AllowEject:  s.allowEject,
 		AuthOn:      s.authOn,
+		StageDir:    s.stageDir,
 		UploadMax:   s.uploadMax,
 		ReadSpeedKB: s.readSpeedKB,
 		Uptime:      time.Since(s.startedAt).Round(time.Second).String(),

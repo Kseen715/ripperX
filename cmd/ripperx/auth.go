@@ -319,13 +319,34 @@ func (a *auth) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 // openPaths are reachable without a token: the login page, the endpoint it
-// posts to, and the icon the browser fetches for it.
+// posts to, and everything that page needs in order to look like itself and
+// speak the reader's language.
 var openPaths = map[string]bool{
 	"/login":       true,
 	"/api/login":   true,
 	"/api/logout":  true,
 	"/api/refresh": true,
 	"/favicon.svg": true,
+	"/base.css":    true,
+	"/i18n.js":     true,
+	"/api/locales": true,
+}
+
+// openPrefixes are the same thing for a directory of them. The locale files
+// are the only one: the sign-in page cannot ask for a password in the
+// reader's language without being allowed to read the words first.
+var openPrefixes = []string{"/locales/"}
+
+func openPath(p string) bool {
+	if openPaths[p] {
+		return true
+	}
+	for _, prefix := range openPrefixes {
+		if strings.HasPrefix(p, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // guard rejects anything without a valid access token, first giving a valid
@@ -335,7 +356,7 @@ var openPaths = map[string]bool{
 // user back to the login form; a page request is redirected there directly.
 func (a *auth) guard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if openPaths[r.URL.Path] {
+		if openPath(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}

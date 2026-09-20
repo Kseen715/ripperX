@@ -17,7 +17,20 @@ const { JSDOM, VirtualConsole } = require('jsdom');
 
 const web = __dirname;
 const html = fs.readFileSync(path.join(web, 'index.html'), 'utf8')
+  .replace('<script src="i18n.js"></script>', '')
   .replace('<script src="app.js"></script>', '');
+
+// The page's words live in locale files the server serves. The test reads
+// them off disk and hands them to the page through the same two URLs, so a
+// key added to the code and forgotten in the file shows up here rather than
+// on somebody's screen.
+const locales = {};
+for (const file of fs.readdirSync(path.join(web, 'locales'))) {
+  if (file.endsWith('.json')) {
+    locales[file.replace('.json', '')] =
+      JSON.parse(fs.readFileSync(path.join(web, 'locales', file), 'utf8'));
+  }
+}
 
 let failures = 0;
 function check(name, ok, detail) {
@@ -65,6 +78,10 @@ const isos = {
   store: '//nas/iso', kind: 'smb', readOnly: true,
 };
 const routes = {
+  '/api/locales': {
+    default: 'en',
+    languages: Object.entries(locales).map(([code, d]) => ({ code, name: d._name })),
+  },
   '/api/status': status,
   '/api/images': images,
   '/api/isos': isos,
@@ -76,6 +93,9 @@ window.fetch = async (url) => {
   fetches++;
   const p = String(url).split('?')[0];
   let body = routes[p];
+  if (p.startsWith('/locales/')) {
+    body = locales[p.slice('/locales/'.length).replace('.json', '')] || {};
+  }
   if (p.startsWith('/api/drives/') && p.endsWith('/browse')) {
     body = { path: '/', parent: '', volume: { volumeId: 'DMC_STRA' }, entries: [] };
   } else if (p.startsWith('/api/drives/') && !p.includes('/', 12 + 3)) {
@@ -120,7 +140,8 @@ function detail(present = true) {
 }
 function snapshot(jobs) { return { drives: [drive()], jobs: jobs || [] }; }
 
-const app = fs.readFileSync(path.join(web, 'app.js'), 'utf8');
+const app = fs.readFileSync(path.join(web, 'i18n.js'), 'utf8') + '\n' +
+  fs.readFileSync(path.join(web, 'app.js'), 'utf8');
 try {
   window.eval(app);
 } catch (e) {
@@ -335,6 +356,46 @@ const settle = () => new Promise((r) => setTimeout(r, 30));
   window.fetch = realFetch;
 
   check('nothing threw', errors.length === 0, errors.join('\n'));
+  // ---- every word on the page came out of a locale file ----
+  // A key with no string anywhere renders as the key itself, which is a
+  // shape no sentence has: lower-case words joined by dots and nothing else.
+  // Sweeping the rendered page for that catches a string added to the code
+  // and forgotten in en.json, which is otherwise invisible until a reader
+  // meets it.
+  const missing = new Set();
+  const keyish = /^[a-z][a-zA-Z0-9]*(\.[a-zA-Z0-9]+)+$/;
+  const walk = (node) => {
+    for (const child of node.childNodes) {
+      if (child.nodeType === 3) {
+        const text = child.textContent.trim();
+        if (keyish.test(text)) missing.add(text);
+      } else if (child.nodeType === 1) {
+        for (const attr of ['placeholder', 'title', 'aria-label']) {
+          const v = child.getAttribute && child.getAttribute(attr);
+          if (v && keyish.test(v.trim())) missing.add(v.trim());
+        }
+        walk(child);
+      }
+    }
+  };
+  walk(doc.body);
+  check('every string on the page has a translation', missing.size === 0,
+    Array.from(missing).join(', '));
+
+  // And the locale files agree with each other about which keys exist, so a
+  // language added later is not quietly half-finished.
+  const stem = (k) => k.replace(/\.(one|few|many|other)$/, '');
+  const enKeys = new Set(Object.keys(locales.en).map(stem));
+  for (const [code, dict] of Object.entries(locales)) {
+    if (code === 'en') continue;
+    const have = new Set(Object.keys(dict).map(stem));
+    const gaps = Array.from(enKeys).filter((k) => !have.has(k));
+    const extra = Array.from(have).filter((k) => !enKeys.has(k));
+    check(`${code}.json covers the same keys as en.json`,
+      gaps.length === 0 && extra.length === 0,
+      `missing: ${gaps.join(', ')} | unknown: ${extra.join(', ')}`);
+  }
+
   console.log(failures ? `\n${failures} failed` : '\nall good');
   process.exit(failures ? 1 : 0);
 })();

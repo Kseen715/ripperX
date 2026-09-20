@@ -96,27 +96,32 @@
 <div class="card">
   <header>
     <h1>ripperX</h1>
-    <p>Sign in to use the drives.</p>
+    <p data-i18n="login.subtitle">Sign in to use the drives.</p>
   </header>
 
   <form class="panel cut" id="form">
     <div class="err" id="error" hidden></div>
-    <label class="label" for="user">User</label>
+    <label class="label" for="user" data-i18n="login.user">User</label>
     <input id="user" name="user" autocomplete="username" autocapitalize="none"
            autocorrect="off" spellcheck="false" required autofocus>
-    <label class="label" for="password">Password</label>
+    <label class="label" for="password" data-i18n="login.password">Password</label>
     <input id="password" name="password" type="password"
            autocomplete="current-password" required>
-    <button id="submit" type="submit">Sign in</button>
-    <p class="foot">
+    <button id="submit" type="submit" data-i18n="login.go">Sign in</button>
+    <p class="foot" data-i18n="login.foot">
       This browser stays signed in until you sign out.
     </p>
   </form>
 </div>
+<script src="i18n.js"></script>
 <script>
 'use strict';
 
 const el = (id) => document.getElementById(id);
+
+// The words come from the same locale files the main page uses, so a server
+// set to another language asks for a password in it.
+i18n.start();
 
 el('form').addEventListener('submit', async (ev) => {
   ev.preventDefault();
@@ -129,7 +134,7 @@ el('form').addEventListener('submit', async (ev) => {
       body: JSON.stringify({ user: el('user').value, password: el('password').value }),
     });
     if (!r.ok) {
-      let msg = `HTTP ${r.status}`;
+      let msg = t('error.http', { status: r.status });
       try { msg = (await r.json()).error || msg; } catch (e) {}
       el('error').textContent = msg;
       el('error').hidden = false;

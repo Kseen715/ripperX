@@ -90,22 +90,20 @@ func testVolume(t *testing.T) *iso9660.FS {
 }
 
 // A menu entry that cannot be produced is worse than one that is missing,
-// so every format offered has to actually build a writer.
+// so every format offered has to come out of the same call the page makes.
+// An .iso does not go through newArchiveWriter at all - it has its own
+// writer - which is exactly why this goes through writeArchive instead.
 func TestEveryOfferedFormatWorks(t *testing.T) {
+	fsys := testVolume(t)
+	plan, err := planFiles(fsys, []string{"/"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, f := range archiveFormats {
 		var buf bytes.Buffer
-		w, err := newArchiveWriter(f, &buf)
+		err := writeArchive(context.Background(), &buf, f, fsys, plan, "disc"+f.Extension, archiveProgress{})
 		if err != nil {
 			t.Errorf("%s: %v", f.ID, err)
-			continue
-		}
-		e := iso9660.Entry{Name: "a.txt", Path: "/dir/a.txt", Size: 5, ModTime: time.Now()}
-		if err := w.addFile("dir/a.txt", e, bytes.NewReader([]byte("hello"))); err != nil {
-			t.Errorf("%s: adding a file: %v", f.ID, err)
-			continue
-		}
-		if err := w.Close(); err != nil {
-			t.Errorf("%s: closing: %v", f.ID, err)
 			continue
 		}
 		if buf.Len() == 0 {
@@ -318,7 +316,7 @@ func TestArchiveProgressCountsSourceBytes(t *testing.T) {
 	f, _ := archiveByID("tar.gz")
 	var started int
 	var lastDone int64
-	err = writeArchive(context.Background(), io.Discard, f, fsys, plan, archiveProgress{
+	err = writeArchive(context.Background(), io.Discard, f, fsys, plan, "disc.tar.gz", archiveProgress{
 		starting: func(iso9660.Entry) { started++ },
 		finished: func(done int64) {
 			if done < lastDone {
@@ -414,6 +412,66 @@ func TestSplitExtensionKeepsTwoPartSuffixes(t *testing.T) {
 		stem, ext := splitExtension(in)
 		if stem != want[0] || ext != want[1] {
 			t.Errorf("splitExtension(%q) = %q, %q, want %q, %q", in, stem, ext, want[0], want[1])
+		}
+	}
+}
+
+// A folder taken off a disc as an .iso has to come back as a disc: the same
+// files, readable by the same reader, and burnable without being unpacked
+// first. That last part is what the sector count checks - a burn refuses a
+// file that is not a whole number of 2048-byte sectors.
+func TestISOFormatProducesABurnableImage(t *testing.T) {
+	fsys := testVolume(t)
+	plan, err := planFiles(fsys, []string{"/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	format, ok := archiveByID("iso")
+	if !ok {
+		t.Fatal("the iso format is not offered")
+	}
+	var buf bytes.Buffer
+	if err := writeArchive(context.Background(), &buf, format, fsys, plan, "taken.iso", archiveProgress{}); err != nil {
+		t.Fatalf("writing the image: %v", err)
+	}
+	if buf.Len()%iso9660.BlockSize != 0 {
+		t.Fatalf("the image is %d bytes, which is not whole sectors, so a burn would refuse it", buf.Len())
+	}
+	// The plan's own figure is what the room check and the Content-Length
+	// are taken from, so it has to be the real one.
+	layout, err := isoLayout(plan, "taken.iso")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if layout.Size() != int64(buf.Len()) {
+		t.Errorf("the plan promised %d bytes and the image is %d", layout.Size(), buf.Len())
+	}
+
+	out, err := iso9660.Open(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("the image does not read back: %v", err)
+	}
+	if out.Volume().VolumeID != "TAKEN" {
+		t.Errorf("the volume calls itself %q, want TAKEN", out.Volume().VolumeID)
+	}
+	for _, e := range plan.files {
+		name := plan.under(e)
+		f, got, err := out.Open("/" + name)
+		if err != nil {
+			t.Errorf("/%s is not in the image: %v", name, err)
+			continue
+		}
+		if got.Size != e.Size {
+			t.Errorf("/%s is %d bytes in the image and %d on the disc", name, got.Size, e.Size)
+		}
+		want, _, err := fsys.Open(e.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		a, _ := io.ReadAll(f)
+		b, _ := io.ReadAll(want)
+		if !bytes.Equal(a, b) {
+			t.Errorf("/%s came out as %q, want %q", name, a, b)
 		}
 	}
 }

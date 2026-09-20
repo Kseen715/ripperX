@@ -212,7 +212,10 @@ func (s *server) handleConvert(w http.ResponseWriter, r *http.Request) {
 			Error: fmt.Sprintf("%s is %d bytes, which is not a whole number of 2352-byte sectors, so it is not a raw image", req.Name, size)})
 		return
 	}
-	out := strings.TrimSuffix(req.Name, filepath.Ext(req.Name)) + ".iso"
+	// unique, for the same reason a rip is: the name is worked out from the
+	// raw image rather than typed, so converting "disc.img" twice would
+	// otherwise write over the .iso the first one made without saying so.
+	out := s.unique(strings.TrimSuffix(req.Name, filepath.Ext(req.Name)) + ".iso")
 
 	job := s.jobs.start("convert", "", fmt.Sprintf("%s to %s", req.Name, out),
 		size/mmc.SectorRaw*mmc.SectorData,

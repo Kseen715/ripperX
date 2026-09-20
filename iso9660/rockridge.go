@@ -218,11 +218,13 @@ func (f *FS) detectRockRidge() bool {
 			found = true
 		case "ER":
 			// The extension identifier names the extension; Rock Ridge
-			// registers itself as either of these two.
-			if len(body) >= 5 {
+			// registers itself as either of these two. The body is four
+			// lengths - identifier, description, source, extension version
+			// - and then the identifier itself.
+			if len(body) >= 4 {
 				idLen := int(body[0])
-				if 5+idLen <= len(body) {
-					id := string(body[5 : 5+idLen])
+				if 4+idLen <= len(body) {
+					id := string(body[4 : 4+idLen])
 					if strings.HasPrefix(id, "RRIP") || strings.HasPrefix(id, "IEEE_P1282") {
 						found = true
 					}

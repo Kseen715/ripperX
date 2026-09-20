@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/Kseen715/ripperX/discfs"
 	"github.com/Kseen715/ripperX/iso9660"
@@ -51,7 +52,15 @@ var archiveFormats = []archiveFormat{
 		"Smaller than gzip and markedly slower. Worth it for text and for installer discs."},
 	{"tar.xz", "Tar + xz", ".tar.xz", "application/x-xz",
 		"The smallest of these, and the slowest by some way. Right when the archive is going to be kept for years rather than opened tomorrow."},
+	{"iso", "ISO 9660 image", ".iso", "application/x-iso9660-image",
+		"A disc rather than a file about one: it mounts anywhere and it can be burned as it is, so a folder taken off a disc can go straight back onto one. No compression, and the long names are kept twice over - in Joliet and in Rock Ridge - so they survive on Windows and on Unix alike."},
 }
+
+// isoFormat is the one entry above that is not an archive at all. It is
+// produced by a different writer, because an image has to know where every
+// file will sit before the first byte is written, where an archive only has
+// to know what comes next.
+const isoFormat = "iso"
 
 func archiveByID(id string) (archiveFormat, bool) {
 	if id == "" {
@@ -230,8 +239,12 @@ type archiveProgress struct {
 
 // writeArchive puts every file of a plan into one archive. It is shared by
 // the download, which writes to the response, and by the rip, which writes
-// to the image store.
-func writeArchive(ctx context.Context, w io.Writer, format archiveFormat, fsys discfs.FS, plan filePlan, p archiveProgress) error {
+// to the image store. name is what the volume of an .iso is called and is
+// ignored by every other format.
+func writeArchive(ctx context.Context, w io.Writer, format archiveFormat, fsys discfs.FS, plan filePlan, name string, p archiveProgress) error {
+	if format.ID == isoFormat {
+		return writeISO(ctx, w, fsys, plan, name, p)
+	}
 	ar, err := newArchiveWriter(format, w)
 	if err != nil {
 		return err
@@ -267,6 +280,119 @@ func writeArchive(ctx context.Context, w io.Writer, format archiveFormat, fsys d
 		}
 	}
 	return ar.Close()
+}
+
+// isoItems turns a plan into the list an image is built from. The
+// directories come first so that a folder with nothing in it still exists on
+// the disc, which is the one thing an archive of the same folder loses.
+func isoItems(plan filePlan) []iso9660.Item {
+	items := make([]iso9660.Item, 0, len(plan.dirs)+len(plan.files))
+	for _, e := range plan.dirs {
+		if name := plan.under(e); name != "" {
+			items = append(items, iso9660.Item{
+				Path: name, IsDir: true, ModTime: e.ModTime, Mode: e.Mode,
+			})
+		}
+	}
+	for _, e := range plan.files {
+		items = append(items, iso9660.Item{
+			Path:    plan.under(e),
+			Size:    e.Size,
+			ModTime: e.ModTime,
+			Mode:    e.Mode,
+			Symlink: e.SymlinkTarget,
+		})
+	}
+	return items
+}
+
+// isoLayout plans the image without writing it, which is how its size is
+// known before anything is read off the disc: a rip can refuse for want of
+// room, and a download can declare a length.
+func isoLayout(plan filePlan, name string) (*iso9660.Layout, error) {
+	return iso9660.Plan(isoItems(plan), iso9660.Options{
+		VolumeID:    isoVolumeID(name),
+		SystemID:    "LINUX",
+		Preparer:    "ripperX",
+		Application: "ripperX",
+		Created:     time.Now(),
+	})
+}
+
+// isoVolumeID is the label the image carries. ISO 9660 allows 32 uppercase
+// d-characters and nothing else, and a volume with no name is one nothing
+// will mount by label.
+func isoVolumeID(name string) string {
+	stem, _ := splitExtension(name)
+	var b strings.Builder
+	for _, r := range strings.ToUpper(stem) {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	out := strings.Trim(b.String(), "_")
+	if len(out) > 32 {
+		out = out[:32]
+	}
+	if out == "" {
+		return "RIPPERX"
+	}
+	return out
+}
+
+// writeISO masters the plan as an ISO 9660 image. Everything is placed
+// first and written in one pass, so nothing is staged and the result can go
+// straight into a socket or onto a share.
+func writeISO(ctx context.Context, w io.Writer, fsys discfs.FS, plan filePlan, name string, p archiveProgress) error {
+	layout, err := isoLayout(plan, name)
+	if err != nil {
+		return err
+	}
+	byPath := make(map[string]iso9660.Entry, len(plan.files))
+	for _, e := range plan.files {
+		byPath[plan.under(e)] = e
+	}
+	var done int64
+	return layout.Write(ctx, w, func(it iso9660.Item) (io.Reader, error) {
+		e, ok := byPath[it.Path]
+		if !ok {
+			return nil, fmt.Errorf("%s is not one of the files that were planned", it.Path)
+		}
+		if p.starting != nil {
+			p.starting(e)
+		}
+		src, _, err := fsys.Open(e.Path)
+		if err != nil {
+			return nil, err
+		}
+		// An image is measured in the bytes read off the disc, like every
+		// other format here, so the bar means the same thing whichever was
+		// chosen.
+		return &countingReader{r: src, done: &done, report: p.finished}, nil
+	})
+}
+
+// countingReader reports progress as the bytes go past. The image writer
+// copies each file itself, so this is the only place that knows how far
+// through one it is.
+type countingReader struct {
+	r      io.Reader
+	done   *int64
+	report func(int64)
+}
+
+func (c *countingReader) Read(b []byte) (int, error) {
+	n, err := c.r.Read(b)
+	if n > 0 {
+		*c.done += int64(n)
+		if c.report != nil {
+			c.report(*c.done)
+		}
+	}
+	return n, err
 }
 
 func (s *server) handleFormats(w http.ResponseWriter, r *http.Request) {

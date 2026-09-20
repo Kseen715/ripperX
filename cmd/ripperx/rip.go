@@ -559,7 +559,12 @@ func (s *server) ripOneTrack(ctx context.Context, rec *jobRecord, dev *mmc.Drive
 // starts so the page can be told the size up front and so a mistyped path
 // fails immediately rather than half-way through.
 type filePlan struct {
-	files  []iso9660.Entry
+	files []iso9660.Entry
+	// dirs is every directory the files sit in, kept so that a format with
+	// real directories in it - an .iso - can have the empty ones too. An
+	// archive of the same folder loses them; a disc written from it should
+	// not.
+	dirs   []iso9660.Entry
 	bytes  int64
 	single bool // exactly one file was asked for, so it is written as itself
 	// root is the part of every path that is not worth carrying into the
@@ -589,10 +594,14 @@ func planFiles(fsys discfs.FS, paths []string) (filePlan, error) {
 	var plan filePlan
 	seen := map[string]bool{}
 	add := func(e iso9660.Entry) {
-		if e.IsDir || seen[e.Path] {
+		if seen[e.Path] {
 			return
 		}
 		seen[e.Path] = true
+		if e.IsDir {
+			plan.dirs = append(plan.dirs, e)
+			return
+		}
 		plan.files = append(plan.files, e)
 		plan.bytes += e.Size
 	}
@@ -605,6 +614,7 @@ func planFiles(fsys discfs.FS, paths []string) (filePlan, error) {
 			add(e)
 			continue
 		}
+		add(e)
 		if err := fsys.Walk(e.Path, func(child iso9660.Entry) error {
 			add(child)
 			return nil
@@ -655,7 +665,18 @@ func commonParent(paths []string) string {
 // holds the drive, and reading the volume descriptors would be refused as a
 // borrow of a drive that is in use.
 func (s *server) ripFiles(ctx context.Context, rec *jobRecord, d *drive, base string, chosen bool, fsys discfs.FS, plan filePlan, format archiveFormat, speedKB int) error {
-	if err := s.checkRoom(plan.bytes); err != nil {
+	// An image is larger than the files in it - directory records, two name
+	// trees and a sector of padding per file - and the plan knows by exactly
+	// how much, so the room check is made against the real figure.
+	need := plan.bytes
+	if format.ID == isoFormat && !plan.single {
+		layout, err := isoLayout(plan, base+format.Extension)
+		if err != nil {
+			return err
+		}
+		need = layout.Size()
+	}
+	if err := s.checkRoom(need); err != nil {
 		return err
 	}
 
@@ -722,7 +743,7 @@ func (s *server) ripFiles(ctx context.Context, rec *jobRecord, d *drive, base st
 	// The archive's progress is counted in the bytes read off the disc, not
 	// the bytes written: a compressed archive has no length until it is
 	// finished, and a bar that cannot reach its end is worse than none.
-	err = writeArchive(ctx, out.plain(), format, fsys, plan, archiveProgress{
+	err = writeArchive(ctx, out.plain(), format, fsys, plan, name, archiveProgress{
 		starting: func(e iso9660.Entry) { rec.setPhase(e.Path) },
 		finished: func(done int64) { rec.progress(done) },
 	})

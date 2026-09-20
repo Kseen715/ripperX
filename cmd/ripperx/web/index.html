@@ -18,6 +18,15 @@
      2. Nothing is shown that was not asked for. One disc, one thing being
         done to it, and the rest a keystroke away. */
 
+  /* The language menu sits with the connection state rather than in a
+     settings page: there is no settings page, and a reader who cannot read
+     the page needs it to be the one control they can find. */
+  .langpick {
+    font: inherit; font-size: 11px; letter-spacing: .06em; padding: 3px 6px;
+    background: var(--panel); color: var(--ink-2); border: 1px solid var(--hair);
+  }
+  .langpick:hover { color: var(--ink); border-color: var(--line); }
+
   /* ---------- the drives ---------- */
 
   /* A drive is a row, not a card. Most machines have one, and a card for a
@@ -393,11 +402,14 @@
     <div class="masthead">
       <div>
         <h1>ripperX</h1>
-        <p id="status" class="mono sub">connecting&hellip;</p>
+        <p id="status" class="mono sub" data-i18n="app.connecting">connecting&hellip;</p>
       </div>
       <div class="headright">
-        <span id="conn" class="conn">connecting&hellip;</span>
-        <button id="btnLogout" hidden>Sign out</button>
+        <!-- The language menu is built from the locale files the build
+             carries, so a new language appears here by existing. -->
+        <select id="lang" class="langpick" data-i18n-label="lang.choose" hidden></select>
+        <span id="conn" class="conn" data-i18n="conn.connecting">connecting&hellip;</span>
+        <button id="btnLogout" data-i18n="nav.signOut" hidden>Sign out</button>
       </div>
     </div>
   </header>
@@ -406,17 +418,16 @@
   <div id="error" class="err" hidden></div>
 
   <div class="panel cut" id="drivesPanel">
-    <p class="label">Drives</p>
+    <p class="label" data-i18n="drives.title">Drives</p>
     <div id="drives"></div>
-    <p class="muted" id="noDrives" hidden style="font-size:12px;margin:0">
-      No optical drive was found on this machine.
-    </p>
+    <p class="muted" id="noDrives" hidden style="font-size:12px;margin:0"
+       data-i18n="drives.none">No optical drive was found on this machine.</p>
   </div>
 
   <div class="panel cut" id="work" hidden>
     <div class="dischead">
       <div class="who">
-        <p class="label" id="workTitle" style="margin-bottom:6px">Drive</p>
+        <p class="label" id="workTitle" style="margin-bottom:6px" data-i18n="work.drive">Drive</p>
         <h2 id="discTitle">&mdash;</h2>
         <p class="sub" id="discLine"></p>
       </div>
@@ -424,86 +435,91 @@
     </div>
 
     <details class="more" id="discMore">
-      <summary>Everything the disc says about itself</summary>
+      <summary data-i18n="disc.more">Everything the disc says about itself</summary>
       <div class="inner"><dl id="discFacts"></dl></div>
     </details>
 
-    <nav class="seg" id="seg" aria-label="What to do with this disc"></nav>
+    <nav class="seg" id="seg" data-i18n-label="seg.aria"></nav>
 
     <section class="pane" id="paneRip" hidden>
-      <h3>Rip this disc</h3>
+      <h3 data-i18n="rip.title">Rip this disc</h3>
       <div class="fields">
         <span class="field">
-          <label for="ripKind">What to make</label>
+          <label for="ripKind" data-i18n="rip.what">What to make</label>
           <select id="ripKind"></select>
         </span>
         <span class="field">
-          <label for="ripName">Call it</label>
-          <input id="ripName" type="text" placeholder="taken from the disc's label">
+          <label for="ripName" data-i18n="rip.callIt">Call it</label>
+          <!-- autocomplete off: a browser that remembers a name typed once
+               fills it in silently every time afterwards, and a name that
+               was supplied is used exactly as it is - so the date that
+               keeps two rips of one disc apart quietly stops appearing. -->
+          <input id="ripName" type="text" autocomplete="off"
+                 data-i18n-placeholder="rip.namePlaceholder">
         </span>
         <span class="field">
-          <label for="ripSpeed">Read at</label>
+          <label for="ripSpeed" data-i18n="common.readAt">Read at</label>
           <select id="ripSpeed">
-            <option value="0">the drive's own speed</option>
+            <option value="0" data-i18n="speed.drive">the drive's own speed</option>
             <option value="4234">24x</option>
             <option value="2822">16x</option>
             <option value="1410">8x</option>
             <option value="705">4x</option>
             <option value="352">2x</option>
-            <option value="176">1x - for a scratched disc</option>
+            <option value="176" data-i18n="speed.scratched">1x - for a scratched disc</option>
           </select>
         </span>
         <span class="field" id="ripLengthField">
-          <label for="ripLength">Cover</label>
+          <label for="ripLength" data-i18n="rip.cover">Cover</label>
           <select id="ripLength">
-            <option value="track">the whole data track</option>
-            <option value="volume">only what the filesystem claims</option>
+            <option value="track" data-i18n="rip.coverTrack">the whole data track</option>
+            <option value="volume" data-i18n="rip.coverVolume">only what the filesystem claims</option>
           </select>
         </span>
-        <button id="btnRip" class="primary">Start</button>
+        <button id="btnRip" class="primary" data-i18n="common.start">Start</button>
       </div>
       <p class="hint" id="ripHint"></p>
     </section>
 
     <section class="pane" id="paneCheck" hidden>
-      <h3>Check the surface</h3>
+      <h3 data-i18n="check.title">Check the surface</h3>
       <div class="fields">
         <span class="field">
-          <label for="scanSpeed">Read at</label>
+          <label for="scanSpeed" data-i18n="common.readAt">Read at</label>
           <select id="scanSpeed">
-            <option value="0">the drive's own speed</option>
+            <option value="0" data-i18n="speed.drive">the drive's own speed</option>
             <option value="2822">16x</option>
             <option value="1410">8x</option>
-            <option value="705">4x - finds the most</option>
+            <option value="705" data-i18n="speed.thorough">4x - finds the most</option>
           </select>
         </span>
-        <button id="btnScan">Check this disc</button>
+        <button id="btnScan" data-i18n="check.button">Check this disc</button>
       </div>
       <p class="hint" id="scanNote"></p>
       <div id="scanResult" hidden style="margin-top:16px"></div>
     </section>
 
     <section class="pane" id="paneBurn" hidden>
-      <h3>Burn a disc</h3>
+      <h3 data-i18n="burn.title">Burn a disc</h3>
       <div id="burnBlocked" class="muted" style="font-size:12px" hidden></div>
       <div id="burnFields" hidden>
         <div class="fields">
           <span class="field">
-            <label for="burnSource">From</label>
+            <label for="burnSource" data-i18n="burn.from">From</label>
             <select id="burnSource">
-              <option value="images">the image store</option>
-              <option value="isos">the ISO library</option>
+              <option value="images" data-i18n="burn.sourceImages">the image store</option>
+              <option value="isos" data-i18n="burn.sourceISOs">the ISO library</option>
             </select>
           </span>
           <span class="field" style="flex:1 1 300px">
-            <span class="label-as" id="burnImageLabel">Image</span>
+            <span class="label-as" id="burnImageLabel" data-i18n="burn.image">Image</span>
             <div class="picker" id="burnPicker">
               <button type="button" id="burnPick" class="pick-btn" aria-haspopup="listbox"
                       aria-expanded="false" aria-labelledby="burnImageLabel burnPick"></button>
               <div class="pick-pop" id="burnPop" hidden>
                 <input type="search" id="burnFilter" class="pick-search" autocomplete="off"
-                       placeholder="Filter by name, firmware or architecture"
-                       aria-label="Filter the images">
+                       data-i18n-placeholder="burn.filterPlaceholder"
+                       data-i18n-label="images.filterAria">
                 <div class="pick-list" id="burnList" role="listbox"
                      aria-labelledby="burnImageLabel"></div>
                 <p class="pick-empty" id="burnEmpty" hidden></p>
@@ -514,9 +530,9 @@
             <select id="burnImage" hidden></select>
           </span>
           <span class="field">
-            <label for="burnSpeed">Write at</label>
+            <label for="burnSpeed" data-i18n="burn.writeAt">Write at</label>
             <select id="burnSpeed">
-              <option value="0">the drive's own speed</option>
+              <option value="0" data-i18n="speed.drive">the drive's own speed</option>
               <option value="24">24x</option>
               <option value="16">16x</option>
               <option value="8">8x</option>
@@ -528,54 +544,53 @@
         <p id="burnBoot" class="note" hidden style="margin:14px 0 0"></p>
         <div class="row" style="margin-top:14px">
           <label class="check"><input type="checkbox" id="burnVerify" checked>
-            read the disc back and check it</label>
+            <span data-i18n="burn.verify">read the disc back and check it</span></label>
           <label class="check"><input type="checkbox" id="burnDummy">
-            rehearse with the laser off</label>
+            <span data-i18n="burn.rehearse">rehearse with the laser off</span></label>
           <span style="flex:1 1 auto"></span>
-          <button id="btnErase" hidden>Erase this disc</button>
-          <button id="btnBurn" class="primary">Burn</button>
+          <button id="btnErase" data-i18n="burn.erase" hidden>Erase this disc</button>
+          <button id="btnBurn" class="primary" data-i18n="burn.go">Burn</button>
         </div>
         <p class="hint" id="burnHint"></p>
       </div>
     </section>
 
     <section class="pane" id="paneAdd" hidden>
-      <h3>Add files to this disc</h3>
+      <h3 data-i18n="add.title">Add files to this disc</h3>
       <div id="appendBlocked" class="muted" style="font-size:12px" hidden></div>
       <div id="appendFields" hidden>
         <p class="muted" id="appendRoom" style="font-size:12px;margin:0 0 12px"></p>
         <div class="row" style="margin-bottom:10px">
           <input type="search" id="appendFilter" class="findbox" autocomplete="off"
-                 placeholder="Filter by name" aria-label="Filter the images">
+                 data-i18n-placeholder="common.filterByName" data-i18n-label="images.filterAria">
           <span class="muted" id="appendCount" style="font-size:11px;white-space:nowrap"></span>
         </div>
         <div class="scroll" style="max-height:200px;margin-bottom:14px">
           <table class="stacked">
             <thead><tr>
-              <th style="width:1%"></th><th>File</th><th class="num">Size</th>
+              <th style="width:1%"></th>
+              <th data-i18n="common.file">File</th>
+              <th class="num" data-i18n="common.size">Size</th>
             </tr></thead>
             <tbody id="appendRows"></tbody>
           </table>
         </div>
         <div class="fields">
           <span class="field">
-            <label for="appendFolder">Put them in</label>
-            <input id="appendFolder" type="text" placeholder="the disc's root">
+            <label for="appendFolder" data-i18n="add.putIn">Put them in</label>
+            <input id="appendFolder" type="text" autocomplete="off"
+                   data-i18n-placeholder="add.putInPlaceholder">
           </span>
         </div>
         <div class="row" style="margin-top:14px">
           <label class="check"><input type="checkbox" id="appendVerify" checked>
-            read them back off the disc and check them</label>
+            <span data-i18n="add.verify">read them back off the disc and check them</span></label>
           <label class="check"><input type="checkbox" id="appendClose">
-            close the disc afterwards</label>
+            <span data-i18n="add.close">close the disc afterwards</span></label>
           <span style="flex:1 1 auto"></span>
-          <button id="btnAppend" class="primary" disabled>Add to the disc</button>
+          <button id="btnAppend" class="primary" data-i18n="add.go" disabled>Add to the disc</button>
         </div>
-        <p class="hint" id="appendHint">
-          Nothing already on the disc is erased, and the files that are there stay
-          visible: the existing filesystem is read and added to. Closing the disc
-          is the one part of this that cannot be undone.
-        </p>
+        <p class="hint" id="appendHint" data-i18n="add.hint"></p>
       </div>
     </section>
 
@@ -584,16 +599,24 @@
       <div id="filesBody" hidden>
         <p class="bread" id="bread"></p>
         <div class="row" style="margin-bottom:12px">
-          <button id="btnUp">Up</button>
-          <button id="btnRipSel" disabled>Take what is ticked&hellip;</button>
-          <button id="btnArchive">Take this folder&hellip;</button>
+          <button id="btnUp" data-i18n="files.up">Up</button>
+          <button id="btnRipSel" data-i18n="files.takeTicked" disabled>Take what is ticked&hellip;</button>
+          <button id="btnArchive" data-i18n="files.takeFolder">Take this folder&hellip;</button>
+          <!-- A folder's size is the sum of everything under it, which means
+               reading every directory record in the tree. It is asked for
+               rather than given. -->
+          <button id="btnSizes" data-i18n="files.measure"
+                  data-i18n-title="files.measureWhy">Folder sizes</button>
           <span class="muted" id="selNote" style="font-size:11px"></span>
         </div>
         <div class="scroll">
           <table class="stacked">
             <thead><tr>
-              <th style="width:1%"><input type="checkbox" id="selAll" aria-label="select everything here"></th>
-              <th>Name</th><th class="num">Size</th><th class="num drop-col">Changed</th><th></th>
+              <th style="width:1%"><input type="checkbox" id="selAll" data-i18n-label="files.selectAll"></th>
+              <th data-i18n="common.name">Name</th>
+              <th class="num" data-i18n="common.size">Size</th>
+              <th class="num drop-col" data-i18n="files.changed">Changed</th>
+              <th></th>
             </tr></thead>
             <tbody id="fileRows"></tbody>
           </table>
@@ -605,30 +628,32 @@
       <p id="audioNone" class="muted" style="font-size:13px" hidden></p>
       <div id="audioBody" hidden>
         <div class="row" style="margin-bottom:12px">
-          <button id="btnRipAudio" class="primary">Rip every track to .wav</button>
-          <a id="btnM3U" class="btn">Playlist for VLC</a>
+          <button id="btnRipAudio" class="primary" data-i18n="audio.ripAll">Rip every track to .wav</button>
+          <a id="btnM3U" class="btn" data-i18n="audio.playlist">Playlist for VLC</a>
         </div>
         <table class="stacked">
-          <thead><tr><th>Track</th><th class="num">Length</th><th>Play</th><th></th></tr></thead>
+          <thead><tr>
+            <th data-i18n="audio.track">Track</th>
+            <th class="num" data-i18n="audio.length">Length</th>
+            <th data-i18n="audio.play">Play</th>
+            <th></th>
+          </tr></thead>
           <tbody id="trackRows"></tbody>
         </table>
-        <p class="hint">
-          Tracks are served as WAV: the sectors of an audio CD are already PCM, so
-          nothing is decoded or re-encoded on the way to the browser.
-        </p>
+        <p class="hint" data-i18n="audio.hint"></p>
       </div>
     </section>
 
     <section class="pane" id="paneDrive" hidden>
-      <h3>What this drive can do</h3>
+      <h3 data-i18n="drive.title">What this drive can do</h3>
       <dl id="driveFacts" style="margin-bottom:16px"></dl>
       <div class="cols">
         <div>
-          <p class="label">It can</p>
+          <p class="label" data-i18n="drive.can">It can</p>
           <ul id="can"></ul>
         </div>
         <div class="cant">
-          <p class="label">It cannot</p>
+          <p class="label" data-i18n="drive.cannot">It cannot</p>
           <ul id="cannot"></ul>
         </div>
       </div>
@@ -638,19 +663,17 @@
 
   <div class="two">
     <div class="panel cut" style="margin:0">
-      <p class="label">Jobs</p>
+      <p class="label" data-i18n="jobs.title">Jobs</p>
       <div id="jobs"></div>
-      <p class="muted" id="noJobs" style="font-size:12px;margin:0">
-        Nothing running. A rip or a burn appears here as it goes.
-      </p>
+      <p class="muted" id="noJobs" style="font-size:12px;margin:0" data-i18n="jobs.none"></p>
       <details class="more" id="doneMore" hidden>
-        <summary id="doneSummary">Finished</summary>
+        <summary id="doneSummary"></summary>
         <div class="inner"><div id="doneJobs"></div></div>
       </details>
     </div>
 
     <div class="panel cut" style="margin:0">
-      <p class="label">Images</p>
+      <p class="label" data-i18n="images.title">Images</p>
       <p class="muted" id="storeLine" style="font-size:11px;margin:0 0 8px;word-break:break-all"></p>
       <!-- How full the share is. A disc image is four gigabytes at a time,
            and a share fills as quietly as a disk does. -->
@@ -662,34 +685,37 @@
            can report how far it has got, and a form here would only add a
            way to submit it without that. -->
       <label class="drop" id="drop" for="file">
-        Drop an image here, or choose one to upload.
+        <span data-i18n="images.drop">Drop an image here, or choose one to upload.</span>
         <input type="file" id="file" name="file" hidden>
       </label>
       <div class="bar" id="upBar" hidden style="margin-top:10px"><i></i></div>
       <p class="muted mono" id="upNote" hidden style="font-size:11px;margin:6px 0 0"></p>
       <div class="row" style="margin-top:14px">
         <input type="search" id="imageFilter" class="findbox" autocomplete="off"
-               placeholder="Filter by name" aria-label="Filter the images">
+               data-i18n-placeholder="common.filterByName" data-i18n-label="images.filterAria">
         <span class="muted" id="imageCount" style="font-size:11px;white-space:nowrap"></span>
       </div>
       <div class="scroll" style="margin-top:10px">
         <table class="stacked">
-          <thead><tr><th>Name</th><th class="num">Size</th><th></th></tr></thead>
+          <thead><tr>
+            <th data-i18n="common.name">Name</th>
+            <th class="num" data-i18n="common.size">Size</th>
+            <th></th>
+          </tr></thead>
           <tbody id="imageRows"></tbody>
         </table>
       </div>
       <div class="row" style="margin-top:10px">
-        <button id="imageMore" hidden>Show the rest</button>
+        <button id="imageMore" hidden></button>
       </div>
-      <p class="muted" id="noImages" hidden style="font-size:12px;margin:10px 0 0">
-        Nothing here yet. Rip a disc, or upload an image to burn.
-      </p>
+      <p class="muted" id="noImages" hidden style="font-size:12px;margin:10px 0 0"
+         data-i18n="images.none"></p>
     </div>
   </div>
 
   <div class="panel cut" id="discsPanel" hidden>
     <details class="more" id="discsMore">
-      <summary id="discsSummary">Discs checked before</summary>
+      <summary id="discsSummary" data-i18n="discs.title">Discs checked before</summary>
       <div class="inner">
         <p class="muted" id="discsNote" style="font-size:11px;margin:0 0 12px"></p>
         <div id="discs"></div>
@@ -698,10 +724,12 @@
   </div>
 
   <p class="foot">
-    Images are kept in <code id="storeFoot">&hellip;</code>.
-    The HTTP interface behind this page is documented at <a href="/docs">/docs</a>.
-    Writing a disc is handed to <code id="burnerFoot">a burner program</code>,
-    and what it wrote is read back and checked here.
+    <span data-i18n="foot.imagesIn">Images are kept in</span>
+    <code id="storeFoot">&hellip;</code>.
+    <span data-i18n="foot.apiDocs">The HTTP interface behind this page is documented at</span>
+    <a href="/docs">/docs</a>.
+    <span data-i18n="foot.burnedBy">Writing a disc is handed to</span>
+    <code id="burnerFoot">&hellip;</code><span data-i18n="foot.andChecked">, and what it wrote is read back and checked here.</span>
   </p>
 </div>
 
@@ -712,35 +740,36 @@
      quietly stops working. -->
 <dialog id="confirmDialog">
   <form method="dialog" class="body">
-    <h2 id="confirmTitle">Are you sure?</h2>
+    <h2 id="confirmTitle" data-i18n="confirm.title">Are you sure?</h2>
     <p id="confirmWhat" style="margin:10px 0 0;font-size:13px;white-space:pre-wrap"></p>
     <p id="confirmWarn" class="warn" hidden style="margin:12px 0 0"></p>
     <div class="row" style="justify-content:flex-end;margin-top:18px">
-      <button value="cancel" id="confirmNo" autofocus>Cancel</button>
-      <button value="ok" class="primary" id="confirmGo">Yes</button>
+      <button value="cancel" id="confirmNo" data-i18n="common.cancel" autofocus>Cancel</button>
+      <button value="ok" class="primary" id="confirmGo" data-i18n="common.yes">Yes</button>
     </div>
   </form>
 </dialog>
 
 <dialog id="archiveDialog">
   <form method="dialog" class="body">
-    <h2 id="archiveTitle">Download archive</h2>
+    <h2 id="archiveTitle"></h2>
     <p class="muted" id="archiveWhat" style="font-size:12px;margin:0"></p>
-    <p class="label-as" style="margin:14px 0 6px">Call it</p>
+    <p class="label-as" style="margin:14px 0 6px" data-i18n="archive.callIt">Call it</p>
     <input id="archiveName" type="text" autocomplete="off"
            style="font:inherit;font-size:13px;width:100%;padding:8px 9px;background:var(--panel);color:var(--ink);border:1px solid var(--line)">
     <p class="muted" id="archiveNameNote" style="font-size:11px;margin:5px 0 0"></p>
-    <p class="label-as" style="margin:14px 0 0">Where it goes</p>
+    <p class="label-as" style="margin:14px 0 0" data-i18n="archive.where">Where it goes</p>
     <div class="fmt" id="archiveWhere"></div>
-    <p class="label-as" id="archiveFormatsLabel" style="margin:0">Archive as</p>
+    <p class="label-as" id="archiveFormatsLabel" style="margin:0" data-i18n="archive.as">Archive as</p>
     <div class="fmt" id="archiveFormats"></div>
     <div class="row" style="justify-content:flex-end">
-      <button value="cancel">Cancel</button>
-      <button value="ok" class="primary" id="archiveGo">Download</button>
+      <button value="cancel" data-i18n="common.cancel">Cancel</button>
+      <button value="ok" class="primary" id="archiveGo"></button>
     </div>
   </form>
 </dialog>
 
+<script src="i18n.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

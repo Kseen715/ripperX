@@ -398,22 +398,44 @@ func (s *server) burn(ctx context.Context, rec *jobRecord, d *drive, src store, 
 }
 
 // stageImage returns a local path for the image. A local store already has
-// one; anything else is copied to a temporary file, which is also the point
-// at which a share that has gone away is discovered - before the disc is
+// one; anything else is copied to a file first, which is also the point at
+// which a share that has gone away is discovered - before the disc is
 // spoiled rather than in the middle of writing it.
+//
+// Where that copy goes matters more than it looks. The obvious place is the
+// system temporary directory, and on most machines running a systemd
+// service that directory is a tmpfs - which is to say RAM. A dual-layer
+// image is 8 GB, and staging one into RAM either invokes the OOM killer or
+// pushes the whole machine into swap while a laser is waiting on it. So it
+// goes to a real directory, which defaults to where the images are kept when
+// those are local, and the room is checked before a byte is copied.
 func (s *server) stageImage(ctx context.Context, rec *jobRecord, from store, info storedFile) (string, func(), error) {
 	if local, ok := from.(*localStore); ok {
 		if p, ok := local.localPath(info.Name); ok {
 			return p, nil, nil
 		}
 	}
+	dir := s.stageDir
+	if dir == "" {
+		dir = os.TempDir()
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", nil, fmt.Errorf("the staging directory %s cannot be used: %w", dir, err)
+	}
+	if free, _, ok := diskSpace(dir); ok && free < info.Size+stageHeadroom {
+		return "", nil, fmt.Errorf(
+			"%s is %s and %s has %s free, so there is nowhere to put it before the burn; "+
+				"point -stage-dir at a directory with room",
+			info.Name, humanBytes(info.Size), dir, humanBytes(free))
+	}
+
 	src, _, err := from.Open(info.Name)
 	if err != nil {
 		return "", nil, err
 	}
 	defer src.Close()
 
-	tmp, err := os.CreateTemp("", "ripperx-*.iso")
+	tmp, err := os.CreateTemp(dir, "ripperx-*.iso")
 	if err != nil {
 		return "", nil, err
 	}
@@ -421,7 +443,7 @@ func (s *server) stageImage(ctx context.Context, rec *jobRecord, from store, inf
 		tmp.Close()
 		_ = os.Remove(tmp.Name())
 	}
-	rec.say("copying %s from %s before writing", info.Name, from.Describe())
+	rec.say("copying %s from %s into %s before writing", info.Name, from.Describe(), dir)
 	if _, err := copyCtx(ctx, tmp, src, info.Size); err != nil {
 		cleanup()
 		return "", nil, err
@@ -432,6 +454,11 @@ func (s *server) stageImage(ctx context.Context, rec *jobRecord, from store, inf
 	}
 	return tmp.Name(), cleanup, nil
 }
+
+// stageHeadroom is what is left over after a staged image, for the same
+// reason a rip leaves some: filling a filesystem completely costs far more
+// than a refused burn.
+const stageHeadroom = 100 << 20
 
 func hashFile(ctx context.Context, path string) (string, error) {
 	f, err := os.Open(path)
