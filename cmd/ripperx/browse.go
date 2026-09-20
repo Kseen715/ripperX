@@ -27,9 +27,12 @@ type browseResponse struct {
 
 type browseEntry struct {
 	iso9660.Entry
-	// Playable says the browser will open this file itself, which is what
-	// decides whether the page offers a play button or only a download.
-	Playable bool `json:"playable" doc:"a browser can play this file in place"`
+	// Playable says the browser will open this file itself, and
+	// Transcodable that this server can convert it into something the
+	// browser will open. Between them they decide whether the page offers a
+	// play button, and which kind of player it opens.
+	Playable     bool `json:"playable" doc:"a browser can play this file in place"`
+	Transcodable bool `json:"transcodable" doc:"this server can convert it for the browser on the fly"`
 	// Type is what it would be served as.
 	Type string `json:"type" doc:"the content type this file would be served with"`
 }
@@ -75,7 +78,8 @@ func (s *server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 	for _, e := range entries {
 		be := browseEntry{Entry: e}
 		if !e.IsDir {
-			be.Playable = isPlayable(e.Name)
+			be.Playable = playsInBrowser(e.Name)
+			be.Transcodable = s.transcodable(e.Name)
 			be.Type = contentType(e.Name)
 		}
 		resp.Entries = append(resp.Entries, be)

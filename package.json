@@ -1,7 +1,7 @@
 {
   "name": "ripperx-ui-test",
   "private": true,
-  "description": "Only the page's test. ripperX itself has no JavaScript dependencies: app.js is plain script, and this is here so the DOM can be driven without a browser.",
+  "description": "Only the page's test. The page itself is plain script with one vendored library - hls.js, loaded only when a disc is being converted for the browser - and this is here so the DOM can be driven without a browser.",
   "scripts": {
     "test": "node cmd/ripperx/webtest/ui_test.js"
   },

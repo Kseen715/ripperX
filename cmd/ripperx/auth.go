@@ -335,7 +335,12 @@ var openPaths = map[string]bool{
 // openPrefixes are the same thing for a directory of them. The locale files
 // are the only one: the sign-in page cannot ask for a password in the
 // reader's language without being allowed to read the words first.
-var openPrefixes = []string{"/locales/"}
+// The source endpoint is the other: it is how this server's own encoder
+// reads a disc, and it cannot carry a session token - a command line is
+// readable by every account on the machine. What guards it instead is a
+// random name issued for one title and a refusal to answer anything that is
+// not this machine, both checked by the handler itself.
+var openPrefixes = []string{"/locales/", "/api/internal/source/"}
 
 func openPath(p string) bool {
 	if openPaths[p] {

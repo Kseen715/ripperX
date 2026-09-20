@@ -20,7 +20,10 @@ func testServer(t *testing.T) *server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &server{web: sub, authOn: true, drives: newDriveSet(nil)}
+	s := &server{
+		web: sub, authOn: true, drives: newDriveSet(nil),
+		selfHost: "127.0.0.1:8998", nonces: newNonceStore(),
+	}
 	s.jobs = newJobManager(s)
 	s.api = s.routes(&auth{})
 	return s

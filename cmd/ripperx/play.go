@@ -201,18 +201,20 @@ func (s *server) handleDiscFile(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, errorResponse{Error: err.Error()})
 		return
 	}
-	p := r.URL.Query().Get("path")
-	if p == "" {
-		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "no path was given"})
+	// Either a file on the disc, or - with title=<n> - one of the titles
+	// the disc's own index names, which on a DVD is a thing its files do
+	// not correspond to.
+	m, err := sourceFromQuery(r.URL.Query())
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
 		return
 	}
-	fsys, err := d.filesystem()
+	src, entry, err := s.openSource(d, m)
 	if err != nil {
-		writeBusy(w, err)
-		return
-	}
-	src, entry, err := fsys.Open(p)
-	if err != nil {
+		if driveUnavailable(err) {
+			writeBusy(w, err)
+			return
+		}
 		code := http.StatusNotFound
 		if errors.Is(err, iso9660.ErrIsDir) {
 			code = http.StatusBadRequest
@@ -515,9 +517,9 @@ func percentEncode(name string) string {
 	return b.String()
 }
 
-// playableTypes are the media formats a browser will open without help.
-// Everything else is offered as a download and as a line in the playlist,
-// where VLC can have it instead.
+// playableTypes are the media formats ripperX knows the names of: what it
+// serves them as, and what it will list in a playlist for VLC, which plays
+// all of them.
 var playableTypes = map[string]string{
 	".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".aac": "audio/aac",
 	".wav": "audio/wav", ".flac": "audio/flac", ".ogg": "audio/ogg",
@@ -531,6 +533,23 @@ var playableTypes = map[string]string{
 func isPlayable(name string) bool {
 	_, ok := playableTypes[strings.ToLower(path.Ext(name))]
 	return ok
+}
+
+// browserPlayable is the much shorter list of what a browser decodes
+// itself. The difference between the two lists is the whole reason this
+// server has an encoder: a DVD is MPEG-2 in a VOB, and no browser has
+// played that this century. Offering it as a play button and letting the
+// <video> element sit there for ever is the one thing worse than not
+// offering it at all.
+var browserPlayable = map[string]bool{
+	".mp3": true, ".m4a": true, ".aac": true, ".wav": true,
+	".flac": true, ".ogg": true, ".oga": true, ".opus": true,
+	".mp4": true, ".m4v": true, ".webm": true, ".ogv": true,
+	".mov": true,
+}
+
+func playsInBrowser(name string) bool {
+	return browserPlayable[strings.ToLower(path.Ext(name))]
 }
 
 // viewableTypes are the other things worth naming: a browser can show them

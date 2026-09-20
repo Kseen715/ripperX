@@ -1,0 +1,5 @@
+# The page's one third-party file. Marking it keeps GitHub's language
+# statistics about ripperX rather than about a minified library, and keeps
+# it out of diffs nobody reads.
+cmd/ripperx/web/vendor/** linguist-vendored
+cmd/ripperx/web/vendor/** -diff

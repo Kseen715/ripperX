@@ -91,13 +91,71 @@ func (s *server) routes(guard *auth) []route {
 		Desc: "Streamed straight from its extent, with byte ranges honoured, so a browser " +
 			"can scrub through a video without reading the parts it skipped. Add inline=1 " +
 			"to play it in the browser rather than download it. A player with no cookie " +
-			"may pass an access token as the access_token query parameter.",
+			"may pass an access token as the access_token query parameter. On a " +
+			"DVD-Video, title=<n> from /titles takes one title of the disc instead - the " +
+			"stretch of its VOBs that title occupies, as one file.",
 		Param: &param{"id", "the drive's id; the file is the path query parameter"},
 		Type:  "application/octet-stream",
 		Other: []status{
 			{http.StatusConflict, "a job has this drive"},
 			{http.StatusNotFound, "no such file on the disc"},
 		},
+	}, {
+		Method: http.MethodGet, Pattern: "/api/drives/{id}/titles", Handler: s.handleTitles,
+		Summary: "What is actually on a video disc",
+		Desc: "A DVD's files are not its films: VTS_01_1.VOB and its siblings are a " +
+			"gigabyte apiece because the format says so, and what is inside them is " +
+			"several titles one after another, each with its own timeline starting at " +
+			"zero. This reads the disc's own index - the IFO files - and answers with " +
+			"the titles it names, how long each one plays for, and how much of the disc " +
+			"it occupies. Play and download take those numbers as title=<n>.",
+		Param: &param{"id", "the drive's id"},
+		Resp:  dvdDisc{},
+		Other: []status{
+			{http.StatusNotFound, "this disc is not a DVD-Video"},
+			{http.StatusConflict, "a job has this drive"},
+			{http.StatusUnprocessableEntity, "this disc's index could not be read"},
+		},
+	}, {
+		Method: http.MethodGet, Pattern: "/api/drives/{id}/hls/index.m3u8", Handler: s.handleHLSPlaylist,
+		Summary: "A video on the disc as a playlist a browser can seek in",
+		Desc: "For video no browser decodes - a DVD's MPEG-2 above all. It is divided " +
+			"into six-second segments this server encodes one at a time, as they are " +
+			"asked for, so jumping to the middle costs one segment rather than the whole " +
+			"film. Ask for a file with path, or for one of the titles from /titles with " +
+			"title=<n>, which is the only way to be right about the length of a DVD. " +
+			"Needs ffmpeg on the server.",
+		Param: &param{"id", "the drive's id; what to play is the path or title query parameter"},
+		Type:  "application/vnd.apple.mpegurl",
+		Other: []status{
+			{http.StatusNotFound, "no such drive, or this server has no ffmpeg"},
+			{http.StatusUnprocessableEntity, "the file does not say how long it is"},
+			{http.StatusConflict, "a job has this drive"},
+		},
+	}, {
+		Method: http.MethodGet, Pattern: "/api/drives/{id}/hls/{seg}", Handler: s.handleHLSSegment,
+		Summary: "One segment of that playlist, encoded on demand",
+		Desc: "Named like 12.ts, and asked for with the same path or title parameter as " +
+			"the playlist. A segment already encoded is answered from memory, which is what " +
+			"makes scrubbing backwards free; the rest hold the drive for as long as one " +
+			"six-second piece takes to read and encode.",
+		Param: &param{"id", "the drive's id, then /hls/<segment number>.ts"},
+		Type:  "video/mp2t",
+		Other: []status{
+			{http.StatusNotFound, "no such drive, or this server has no ffmpeg"},
+			{http.StatusBadRequest, "that is not a segment number"},
+			{http.StatusConflict, "a job has this drive"},
+		},
+	}, {
+		Method: http.MethodGet, Pattern: "/api/internal/source/{nonce}", Handler: s.handleInternalSource,
+		Summary: "Not for callers: how this server's own encoder reads a disc",
+		Desc: "The encoder has to seek its input and the disc is not a file anywhere, so it " +
+			"reads the disc through this server. The name in the path is random, issued " +
+			"for one title, forgotten fifteen minutes after it was last used, and refused " +
+			"to anything that is not this machine. Nothing else should call it.",
+		Param: &param{"nonce", "the name issued for that title"},
+		Type:  "application/octet-stream",
+		Other: []status{{http.StatusNotFound, "no such name, or the request came from elsewhere"}},
 	}, {
 		Method: http.MethodGet, Pattern: "/api/drives/{id}/archive", Handler: s.handleDiscArchive,
 		Summary: "A directory of the disc as one archive",

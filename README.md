@@ -57,8 +57,11 @@ service account is in the `cdrom` group.
   listing in a single pass over the drive.
 - **Plays media in the browser**: an audio track or a media file on a data
   disc, streamed from the disc with byte ranges honoured, so seeking in the
-  browser seeks the laser. There is an `.m3u` for VLC, with a token in each
-  URL when the server asks for a login.
+  browser seeks the laser. A DVD is listed as the titles its own index names
+  - which its files do not correspond to - and [converted as it is
+  watched](#watching-a-dvd), because no browser decodes MPEG-2. There is an
+  `.m3u` for VLC, with a token in each URL when the server asks for a
+  login.
 - **Burns a disc** from an image, with every check that can be made before
   the laser is switched on, and — unless told not to — reads every sector
   back afterwards and compares it with the image, byte for byte and by
@@ -165,6 +168,18 @@ there):
 ```
 apt install xorriso        # Debian, Ubuntu
 dnf install xorriso        # Fedora
+```
+
+Watching a video disc in the page needs `ffmpeg` (with `ffprobe` beside it),
+for the reason described under [Playing a
+disc](#watching-a-dvd): a DVD is MPEG-2 and no browser
+decodes it. Without ffmpeg nothing breaks — the file is still browsable,
+rippable and playable in VLC — and with it a DVD plays in the page, scrub
+bar and all:
+
+```
+apt install ffmpeg         # Debian, Ubuntu
+dnf install ffmpeg         # Fedora
 ```
 
 One setting is worth knowing about before the first burn from a share. An
@@ -355,6 +370,80 @@ several pieces, which is handled where an ISO 9660 file never needs it.
 Reading is implemented, not writing: the virtual and sparable partition maps
 that packet-written rewritable media use belong to a disc being written a
 block at a time, which is not a disc anyone is ripping.
+
+### Watching a DVD
+
+A DVD is MPEG-2 in a VOB, and no browser has decoded MPEG-2 for years. The
+file is served correctly, the `<video>` element takes it without complaint,
+and then nothing ever happens - which is what a disc full of VOBs used to
+look like on the page.
+
+So it is converted on the way out, by ffmpeg, as HLS. The title is divided
+into six-second segments and each one is encoded by its own ffmpeg when it
+is asked for. That is what makes seeking work: a player jumping to the
+ninety-minute mark asks for the segment at the ninety-minute mark, ffmpeg
+seeks the disc to it, and one segment later there is a picture - instead of
+ninety minutes of decoding nobody wants to watch. Segments already produced
+are kept in memory, so scrubbing back over ground already covered costs
+nothing and the laser is not sent over it twice.
+
+Nothing is staged on disk. The disc is read as the film is watched, which
+does mean the drive is held for as long as somebody is watching: a rip
+started meanwhile is refused with "this drive is streaming a file to a
+browser", the same answer a download gets.
+
+One segment is encoded at a time per drive, and an encode is shared by
+everybody waiting for it. Both are about the drive rather than the
+processor. Two encoders reading two places on one disc spend their time
+moving the head between them and finish later than either would alone; and
+a player that has waited longer than it likes asks again, so an encode tied
+to the request that started it would be killed and restarted by the very
+player waiting for it - a loop a film never comes out of. The encode
+therefore runs to the end, into memory, whether or not anybody is still
+listening.
+
+**What is played is a title, not a file.** This is the part that decides
+whether any of it works. `VTS_01_1.VOB` and its siblings are a gigabyte
+apiece because the format says so, and what is inside them is several titles
+one after another, each with its own timeline starting at zero again. A disc
+of eighteen episodes is five files; a film with a trailer on it is one file
+holding two timelines.
+
+So the length of a VOB cannot be asked of the VOB. ffprobe answers honestly
+- the last timestamp it saw minus the first - and on such a disc that is the
+length of whichever timeline happened to be last: a two-hour disc comes back
+as eighteen seconds, and every seek lands in the wrong place. Neither
+ffmpeg nor anything else can do better from the file alone, because the file
+does not record it.
+
+The disc does, in the IFO files beside the VOBs. ripperX reads them - the
+title table in `VIDEO_TS.IFO`, the program chains and cells in each
+`VTS_XX_0.IFO` - and so knows every title, how long it plays for, and which
+sectors of the VOB set it occupies. Those titles are what the DVD tab lists
+and what `title=<n>` plays or downloads, each one a stream of its own with
+timestamps that start where the title starts. A film disc has one title, the
+length of the film; an episode disc has eighteen. Pressing Play on a VOB in
+the file browser leads to that list rather than to a player, because a file
+holding three titles is not a thing that can be played.
+
+Two corrections are made to the picture on the way. DVD video is usually
+interlaced, so frames that say they are get deinterlaced; and it is
+anamorphic - 720x576 shown as 16:9 - so it is scaled to square pixels here
+rather than left to a browser that may or may not read the aspect ratio out
+of a transport stream.
+
+The encoder cannot read the disc as a file, because the disc is not mounted:
+ripperX reads its sectors itself. So ffmpeg reads it back through this
+server, over the loopback, using the same byte ranges a browser downloading
+the file would use. That request cannot carry the user's own token - a
+command line is readable by every account on the machine through `/proc` -
+so it carries a random name instead, issued for one title, forgotten fifteen
+minutes after its last use, and refused to anything that is not this
+machine.
+
+Bitmap subtitles, alternate audio tracks, angles and menus are not offered:
+the first video and the first audio track of the title are what is played.
+For those the `.m3u` and VLC are still the better answer.
 
 ### Writing an archive back to a disc
 

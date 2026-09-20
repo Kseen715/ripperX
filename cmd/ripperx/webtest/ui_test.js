@@ -99,8 +99,10 @@ window.fetch = async (url) => {
   if (p.startsWith('/locales/')) {
     body = locales[p.slice('/locales/'.length).replace('.json', '')] || {};
   }
-  if (p.startsWith('/api/drives/') && p.endsWith('/browse')) {
-    body = { path: '/', parent: '', volume: { volumeId: 'DMC_STRA' }, entries: [] };
+  if (p.startsWith('/api/drives/') && p.endsWith('/titles')) {
+    body = { titles: dvdTitles };
+  } else if (p.startsWith('/api/drives/') && p.endsWith('/browse')) {
+    body = { path: '/', parent: '', volume: { volumeId: 'DMC_STRA' }, entries: browseEntries };
   } else if (p.startsWith('/api/drives/') && !p.includes('/', 12 + 3)) {
     body = detail(loaded);
   }
@@ -119,6 +121,12 @@ window.XMLHttpRequest = class { open() {} send() {} setRequestHeader() {} upload
 // thing the event stream is saying.
 let loaded = true;
 let burnable = false;
+// What the disc holds when it is browsed. Empty until the player is being
+// tested, so the listing tests above see the directory they expect.
+let browseEntries = [];
+// What the disc's own index says is on it: nothing, until the DVD tab is
+// being tested.
+let dvdTitles = [];
 
 function disc(present = true) {
   return present ? {
@@ -137,6 +145,7 @@ function drive(present = true, busy = false) {
 }
 function detail(present = true) {
   return Object.assign(drive(present), {
+    dvdTitles: dvdTitles.length,
     volume: present ? { volumeId: 'DMC_STRA', format: 'UDF', joliet: false, rockRidge: false } : null,
     capabilities: { info: { vendor: 'HL-DT-ST', product: 'BD-RE', version: '1.00' }, can: ['read DVD discs'], cannot: ['write BD-R'], notes: [] },
   });
@@ -367,6 +376,155 @@ const settle = () => new Promise((r) => setTimeout(r, 30));
   // meets it.
   const missing = new Set();
   const keyish = /^[a-z][a-zA-Z0-9]*(\.[a-zA-Z0-9]+)+$/;
+  // What happens when Play is pressed, which is the whole of the DVD story.
+  // A VOB is not something a browser decodes, and the page used to open a
+  // <video> for it anyway and leave it there, loading for ever with nothing
+  // to say. It has to go to the converted stream instead - and a file the
+  // browser really can play has to be played straight off the disc, because
+  // converting that would read the disc for no reason at all.
+  window.HTMLMediaElement.prototype.play = () => Promise.resolve();
+  // Chromium says "maybe" to a playlist and then does not play one: it
+  // reads the length, buffers six seconds and stops. So the library is
+  // asked first, and this is the browser that proves it has to be.
+  window.HTMLMediaElement.prototype.canPlayType = () => 'maybe';
+  const hlsSources = [];
+  let hlsDestroyed = 0;
+  window.Hls = class {
+    static isSupported() { return true; }
+    static Events = { ERROR: 'hlsError' };
+    on() {}
+    loadSource(src) { hlsSources.push(src); }
+    attachMedia() {}
+    destroy() { hlsDestroyed++; }
+  };
+
+  browseEntries = [{
+    name: 'VTS_01_1.VOB', path: '/VIDEO_TS/VTS_01_1.VOB', isDir: false, size: 1073739776,
+    modTime: '2007-09-03T00:00:00Z', type: 'video/mpeg', playable: false, transcodable: true,
+  }, {
+    name: 'clip.mp4', path: '/clip.mp4', isDir: false, size: 1024,
+    modTime: '2007-09-03T00:00:00Z', type: 'video/mp4', playable: true, transcodable: true,
+  }, {
+    name: 'README.TXT', path: '/README.TXT', isDir: false, size: 12,
+    modTime: '2007-09-03T00:00:00Z', type: 'text/plain; charset=utf-8',
+    playable: false, transcodable: false,
+  }];
+  doc.getElementById('seg').querySelector('[data-key=rip]').click();
+  await settle();
+  doc.getElementById('seg').querySelector('[data-key=files]').click();
+  await settle();
+  await settle();
+
+  const fileRowFor = (name) => Array.from(doc.querySelectorAll('#fileRows tr'))
+    .find((tr) => tr.textContent.includes(name));
+  const playButton = (tr) => Array.from(tr.querySelectorAll('button'))
+    .find((b) => b.textContent === locales.en['files.play']);
+
+  const vobRow = fileRowFor('VTS_01_1.VOB');
+  check('the disc listing was drawn', !!vobRow,
+    doc.getElementById('fileRows').textContent);
+  check('a text file is not offered a player', !playButton(fileRowFor('README.TXT')));
+
+  playButton(vobRow).click();
+  await settle();
+  const vobPlayer = vobRow.nextSibling;
+  check('a VOB opens a player', !!vobPlayer && vobPlayer.dataset.player === '1');
+  check('and says it is being converted',
+    vobPlayer.textContent.includes(locales.en['files.converting']), vobPlayer.textContent);
+  check('and is played through the converted stream',
+    hlsSources.length === 1 &&
+    hlsSources[0] === '/api/drives/sr0/hls/index.m3u8?path=%2FVIDEO_TS%2FVTS_01_1.VOB',
+    hlsSources.join(', '));
+  check('and has no direct source to sit on for ever',
+    !vobPlayer.querySelector('video').getAttribute('src'));
+
+  // Pressing Play again puts the player away, and stopping it matters: a
+  // conversion left running keeps reading the disc with nobody watching.
+  playButton(vobRow).click();
+  await settle();
+  check('closing the player stops the conversion',
+    hlsDestroyed === 1 && !(vobRow.nextSibling && vobRow.nextSibling.dataset.player));
+
+  const mp4Row = fileRowFor('clip.mp4');
+  playButton(mp4Row).click();
+  await settle();
+  const mp4Media = mp4Row.nextSibling.querySelector('video');
+  check('an mp4 is played straight off the disc',
+    mp4Media.getAttribute('src') === '/api/drives/sr0/file?path=%2Fclip.mp4&inline=1',
+    mp4Media.getAttribute('src'));
+  check('and is not converted for no reason', hlsSources.length === 1, hlsSources.join(', '));
+
+  // A container the browser knows holding a codec it does not: the only way
+  // to find that out is to try it, so the failure is caught and converted
+  // rather than left as a player that never starts.
+  mp4Media.dispatchEvent(new window.Event('error'));
+  await settle();
+  check('a file the browser fails on falls back to conversion',
+    hlsSources.length === 2 && hlsSources[1] === '/api/drives/sr0/hls/index.m3u8?path=%2Fclip.mp4',
+    hlsSources.join(', '));
+
+  // Put the listing away, so what is checked below is the page's own words
+  // rather than the names of files invented for this test.
+  playButton(mp4Row).click();
+  doc.getElementById('fileRows').textContent = '';
+
+  // ---- a DVD, where the films are not the files ----
+  //
+  // A VOB is a gigabyte of whichever titles landed in it, each with its own
+  // timeline, so the disc's index is the only thing that knows what is on
+  // it. The tab comes from that index, and Play on a VOB leads there rather
+  // than to a player showing eighteen seconds of the last title in the file.
+  dvdTitles = [
+    { number: 1, vts: 1, seconds: 429, bytes: 267_000_000, chapters: 1, angles: 1 },
+    { number: 2, vts: 1, seconds: 461.8, bytes: 276_000_000, chapters: 1, angles: 1 },
+    { number: 3, vts: 1, seconds: 3725, bytes: 900_000_000, chapters: 12, angles: 1 },
+  ];
+  // The disc is swapped, which is what makes the page ask about it again.
+  push({ drives: [drive(false)], jobs: [] });
+  await settle();
+  push(snapshot([]));
+  await settle();
+  await settle();
+
+  const dvdTab = doc.getElementById('seg').querySelector('[data-key=dvd]');
+  check('a DVD gets a tab of its own', !!dvdTab,
+    Array.from(doc.getElementById('seg').children).map((b) => b.dataset.key).join(', '));
+  dvdTab.click();
+  await settle();
+  const titleRows = Array.from(doc.querySelectorAll('#titleRows tr'));
+  check('every title on the disc is listed', titleRows.length === 3, String(titleRows.length));
+  check('with the length the disc records',
+    titleRows[0].textContent.includes('7:09') && titleRows[2].textContent.includes('1:02:05'),
+    titleRows.map((r) => r.textContent).join(' | '));
+
+  const titlePlay = Array.from(titleRows[1].querySelectorAll('button'))
+    .find((b) => b.textContent === locales.en['files.play']);
+  titlePlay.click();
+  await settle();
+  check('a title is played by number rather than by file',
+    hlsSources.length === 3 && hlsSources[2] === '/api/drives/sr0/hls/index.m3u8?title=2',
+    hlsSources.join(', '));
+  titlePlay.click();
+  await settle();
+
+  doc.getElementById('seg').querySelector('[data-key=files]').click();
+  await settle();
+  await settle();
+  const vobAgain = fileRowFor('VTS_01_1.VOB');
+  playButton(vobAgain).click();
+  await settle();
+  check('Play on a VOB of that disc leads to the titles instead',
+    doc.getElementById('paneDvd').hidden === false &&
+    !(vobAgain.nextSibling && vobAgain.nextSibling.dataset.player),
+    `paneDvd hidden=${doc.getElementById('paneDvd').hidden}`);
+  check('and nothing was converted for the VOB itself',
+    hlsSources.length === 3, hlsSources.join(', '));
+
+  browseEntries = [];
+  dvdTitles = [];
+  doc.getElementById('fileRows').textContent = '';
+  doc.getElementById('titleRows').textContent = '';
+
   const walk = (node) => {
     for (const child of node.childNodes) {
       if (child.nodeType === 3) {

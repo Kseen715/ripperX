@@ -54,6 +54,15 @@ type server struct {
 	store   store
 	burner  *burner
 	history *history
+	// ffmpeg converts what a browser cannot play into something it can. It
+	// is optional: without it a disc of MPEG-2 is offered as a download and
+	// as a line in a playlist, which is what it was before.
+	ffmpeg *transcoder
+	// selfHost is where this server reaches itself, which is how the
+	// encoder reads a disc: through this server's own range requests.
+	selfHost string
+	// nonces are the one-off names those reads are addressed to.
+	nonces *nonceStore
 	// isos is the read-only library of installer images to burn from. It is
 	// a separate store rather than another directory in the same one so
 	// that nothing can write to it by accident.
@@ -101,6 +110,12 @@ func main() {
 			"176 is 1x on a CD. Slowing a drive down is what rescues a scratched disc")
 	burnerPath := flag.String("burner", "",
 		"the burner program to use; empty searches for xorriso, then cdrecord, then wodim")
+	ffmpegPath := flag.String("ffmpeg", "",
+		"the ffmpeg to convert video a browser cannot play, such as a DVD's MPEG-2; "+
+			"empty searches the PATH. ffprobe is expected beside it")
+	allowTranscode := flag.Bool("allow-transcode", true,
+		"offer to convert video for the browser at all. Converting reads the disc for as "+
+			"long as somebody is watching, which is time no rip can have")
 	allowBurn := flag.Bool("allow-burn", true,
 		"offer burning at all. With this off ripperX can only read discs, which is "+
 			"the right setting for a machine whose drives are shared out read-only")
@@ -227,6 +242,8 @@ func main() {
 		isos:        isos,
 		isoFacts:    newFactCache(),
 		burner:      findBurner(*burnerPath),
+		selfHost:    selfHost(*addr),
+		nonces:      newNonceStore(),
 		uploadMax:   *uploadMax,
 		stageDir:    stage,
 		readSpeedKB: *readSpeed,
@@ -234,6 +251,9 @@ func main() {
 		allowEject:  *allowEject,
 		authOn:      guard != nil,
 		startedAt:   time.Now(),
+	}
+	if *allowTranscode {
+		s.ffmpeg = findTranscoder(*ffmpegPath)
 	}
 	s.jobs = newJobManager(s)
 
@@ -294,6 +314,11 @@ func main() {
 		log.Printf("burner: %s (%s)", s.burner.path, s.burner.kind)
 	} else if *allowBurn {
 		log.Print("burner: none found - install xorriso to burn discs")
+	}
+	if s.ffmpeg != nil {
+		log.Printf("transcoder: %s", s.ffmpeg.ffmpeg)
+	} else if *allowTranscode {
+		log.Print("transcoder: none found - install ffmpeg to watch DVDs in a browser")
 	}
 	if guard == nil {
 		log.Print("authentication: off - anyone who can reach this port can use the drives")
@@ -439,6 +464,7 @@ type statusResponse struct {
 	Burner      string `json:"burner" doc:"the burner program found, or empty if there is none"`
 	BurnerKind  string `json:"burnerKind" doc:"xorriso, cdrecord or wodim"`
 	AllowBurn   bool   `json:"allowBurn" doc:"whether this server offers burning at all"`
+	Transcode   bool   `json:"transcode" doc:"whether video a browser cannot play is converted for it"`
 	AllowEject  bool   `json:"allowEject" doc:"whether the page may open and close trays"`
 	AuthOn      bool   `json:"authOn" doc:"whether a login is required"`
 	History     string `json:"history,omitempty" doc:"where scans and finished jobs are recorded, or empty when they are not"`
@@ -456,6 +482,7 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		Store:       s.store.Describe(),
 		StoreKind:   s.store.Kind(),
 		AllowBurn:   s.allowBurn && s.burner != nil,
+		Transcode:   s.ffmpeg != nil,
 		AllowEject:  s.allowEject,
 		AuthOn:      s.authOn,
 		StageDir:    s.stageDir,

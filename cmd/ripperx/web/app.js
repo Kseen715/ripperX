@@ -20,6 +20,7 @@ const state = {
   discKey: '',       // identifies the disc; a change means reload everything below
   path: '/',
   entries: [],
+  titles: [],        // what a DVD's own index says is on it
   picked: new Set(),
   images: [],
   isos: [],
@@ -404,6 +405,7 @@ async function loadDetail() {
 const panes = {
   rip:   { id: 'paneRip',   label: 'pane.rip' },
   files: { id: 'paneFiles', label: 'pane.files' },
+  dvd:   { id: 'paneDvd',   label: 'pane.dvd' },
   audio: { id: 'paneAudio', label: 'pane.audio' },
   check: { id: 'paneCheck', label: 'pane.check' },
   burn:  { id: 'paneBurn',  label: 'pane.burn' },
@@ -420,6 +422,10 @@ function segItems(d) {
   if (present) {
     if (d.canRipIso || d.canRipImg || d.canRipAudio) out.push('rip');
     if (d.canBrowse) out.push('files');
+    // A DVD's films are titles in its index, not the VOBs in its folders,
+    // so they get a list of their own rather than a play button on a file
+    // that holds three of them.
+    if (d.dvdTitles > 0) out.push('dvd');
     if (d.disc.audioTracks > 0) out.push('audio');
     out.push('check');
   }
@@ -455,6 +461,7 @@ function setTab(tab) {
   showPane(tab);
   if (state.detail) renderPane(state.detail);
   if (tab === 'files' && state.entries.length === 0) loadDir(state.path);
+  if (tab === 'dvd' && state.titles.length === 0) loadTitles();
 }
 
 function renderSeg(d) {
@@ -489,6 +496,7 @@ function renderPane(d) {
   switch (state.tab) {
     case 'rip': renderRipPane(d); break;
     case 'files': renderFilesTab(d); break;
+    case 'dvd': renderDvdTab(d); break;
     case 'audio': renderAudioTab(d); break;
     case 'check': renderScanPanel(d); break;
     case 'burn': renderBurnBox(d); break;
@@ -1476,6 +1484,9 @@ function renderFiles(r) {
     !r.entries.some((e) => e.isDir && !state.dirSizes.has(e.path)));
 
   const rows = el('fileRows');
+  // A player left open in the listing being replaced would go on reading
+  // the disc with nothing on screen, so it is stopped rather than dropped.
+  for (const open of rows.querySelectorAll('tr[data-player="1"]')) closePlayer(open);
   rows.textContent = '';
   for (const e of r.entries) {
     rows.appendChild(fileRow(id, e));
@@ -1519,10 +1530,18 @@ function fileRow(id, e) {
   act.className = 'act';
   if (!e.isDir) {
     const file = `/api/drives/${encodeURIComponent(id)}/file?path=${encodeURIComponent(e.path)}`;
-    if (e.playable) {
+    if (e.playable || e.transcodable) {
       const play = text('button', t('files.play'));
       play.type = 'button';
-      play.addEventListener('click', () => togglePlayer(tr, e, file));
+      // A VOB is a gigabyte of whichever titles happened to land in it, so
+      // playing one is not a thing that means anything. The titles are on
+      // their own tab, and this is the way to them.
+      const partOfDVD = isDVDPart(e.name) && state.detail && state.detail.dvdTitles > 0;
+      if (partOfDVD) play.title = t('dvd.playWhy');
+      play.addEventListener('click', () => {
+        if (partOfDVD) setTab('dvd');
+        else togglePlayer(tr, e, file, id);
+      });
       act.appendChild(play);
     }
     // One control rather than two. A file can go to this browser or into
@@ -1562,9 +1581,22 @@ function fileRow(id, e) {
 
 // togglePlayer opens a player underneath the row rather than in a dialog:
 // the file stays where it was found, and a second click puts it away.
-function togglePlayer(tr, e, url) {
-  if (tr.nextSibling && tr.nextSibling.dataset && tr.nextSibling.dataset.player === '1') {
-    tr.nextSibling.remove();
+//
+// Two players come out of this. What the browser decodes itself is played
+// straight off the disc, byte ranges and all, which is the cheapest thing
+// this server can do. Everything else - a DVD's MPEG-2 above all, which no
+// browser has played this century - is converted as it is watched and
+// arrives as a playlist of segments. That is the only arrangement in which
+// the scrub bar works on a film nobody has finished encoding: a jump to the
+// middle asks for the segment in the middle and gets it.
+function isDVDPart(name) {
+  return /^VTS_\d\d_\d\.VOB$/i.test(name);
+}
+
+function togglePlayer(tr, e, url, id) {
+  const open = tr.nextSibling && tr.nextSibling.dataset && tr.nextSibling.dataset.player === '1';
+  if (open) {
+    closePlayer(tr.nextSibling);
     return;
   }
   const row = document.createElement('tr');
@@ -1575,7 +1607,6 @@ function togglePlayer(tr, e, url) {
   const media = document.createElement(video ? 'video' : 'audio');
   media.controls = true;
   media.preload = 'none';
-  media.src = url + '&inline=1';
   if (video) { media.style.width = '100%'; media.style.maxWidth = '640px'; }
   cell.appendChild(media);
   const note = text('p', `${e.type} · ${t('files.streamNote')}`, 'muted');
@@ -1584,7 +1615,136 @@ function togglePlayer(tr, e, url) {
   cell.appendChild(note);
   row.appendChild(cell);
   tr.after(row);
+
+  if (e.playable) {
+    media.src = url + '&inline=1';
+    // A browser can be wrong about what it plays: the container is one it
+    // knows and the codec inside it is not. There is no way to find that
+    // out except by trying, so the failure is caught here and turned into
+    // the converted stream rather than into a player that sits there.
+    media.addEventListener('error', () => {
+      if (e.transcodable) {
+        setText(note, t('files.converting'));
+        startConverted(row, media, note, id, e);
+      } else {
+        playerFailed(note, t('files.cannotPlay'));
+      }
+    });
+    media.play().catch(() => { /* the browser would rather the user pressed play */ });
+    return;
+  }
+  setText(note, t('files.converting'));
+  startConverted(row, media, note, id, e);
+}
+
+// closePlayer puts the player away and, more to the point, stops it: a
+// converted stream that is left running keeps the drive reading a film
+// nobody is watching any more.
+function closePlayer(row) {
+  if (row.hlsPlayer) {
+    row.hlsPlayer.destroy();
+    row.hlsPlayer = null;
+  }
+  const media = row.querySelector('video, audio');
+  if (media) {
+    media.pause();
+    media.removeAttribute('src');
+    media.load();
+  }
+  row.remove();
+}
+
+// startConverted points the player at the playlist this server encodes on
+// demand. Safari plays such a playlist itself; everything else needs the
+// library, which is fetched only now - a page that never plays a DVD never
+// loads it.
+function startConverted(row, media, note, id, e) {
+  const what = e.title
+    ? `title=${encodeURIComponent(e.title)}`
+    : `path=${encodeURIComponent(e.path)}`;
+  const src = `/api/drives/${encodeURIComponent(id)}/hls/index.m3u8?${what}`;
+  // The library first, and the browser's own playlist support only where
+  // there is no library to use.
+  //
+  // It was the other way round, and that is a trap. Chromium answers
+  // canPlayType('application/vnd.apple.mpegurl') with "maybe" and then does
+  // not play one: it reads the playlist, shows the right length, buffers
+  // six seconds and stops with "Parsed buffers not in DTS sequence". A
+  // player showing the length of a film it will never start is exactly the
+  // failure this whole path was built to end, so the question is not asked
+  // of a browser that has a working answer of its own.
+  loadHls().then((Hls) => {
+    if (!Hls || !Hls.isSupported()) {
+      playNativeHLS(media, note, src);
+      return;
+    }
+    // A segment does not exist until the disc has been read and ffmpeg has
+    // finished with it, which on an optical drive is seconds rather than
+    // milliseconds. The defaults here are tuned for a CDN and give up long
+    // before that, and giving up means asking again, which is how a player
+    // can wait for ever for a segment nobody ever finishes.
+    const hls = new Hls({
+      enableWorker: true,
+      manifestLoadingTimeOut: 60000,
+      manifestLoadingMaxRetry: 2,
+      fragLoadingTimeOut: 180000,
+      fragLoadingMaxRetry: 2,
+      // Without this the player abandons a fragment it decides is arriving
+      // too slowly - which is every fragment, when each one is being made
+      // to order.
+      abrEwmaDefaultEstimate: 5000000,
+      testBandwidth: false,
+    });
+    row.hlsPlayer = hls;
+    hls.on(Hls.Events.ERROR, (_evt, data) => {
+      if (!data || !data.fatal) return;
+      hls.destroy();
+      row.hlsPlayer = null;
+      playerFailed(note, t('files.convertFailed'));
+    });
+    hls.loadSource(src);
+    hls.attachMedia(media);
+    media.play().catch(() => { /* the browser would rather the user pressed play */ });
+  }).catch(() => playNativeHLS(media, note, src));
+}
+
+// playNativeHLS is the Safari path, and the last resort anywhere else: a
+// browser that plays a playlist by itself needs nothing but the URL.
+function playNativeHLS(media, note, src) {
+  if (!media.canPlayType || !media.canPlayType('application/vnd.apple.mpegurl')) {
+    playerFailed(note, t('files.cannotPlay'));
+    return;
+  }
+  media.src = src;
   media.play().catch(() => { /* the browser would rather the user pressed play */ });
+}
+
+// playerFailed says why nothing is happening. A silent player that never
+// loads is the bug this whole path exists to end, so every way out of it
+// ends here.
+function playerFailed(note, why) {
+  setText(note, `${why} ${t('files.tryVLC')}`);
+  note.classList.add('why');
+}
+
+// loadHls fetches the player library once, from this server rather than
+// from anywhere else: ripperX runs on machines that are not on the
+// internet, and a page that needs a CDN would not work on them.
+function loadHls() {
+  if (window.Hls) return Promise.resolve(window.Hls);
+  if (!loadHls.pending) {
+    loadHls.pending = new Promise((resolve, reject) => {
+      const tag = document.createElement('script');
+      tag.src = 'vendor/hls.light.min.js';
+      tag.addEventListener('load', () => resolve(window.Hls));
+      tag.addEventListener('error', () => {
+        loadHls.pending = null;
+        reject(new Error('the player library could not be loaded'));
+      });
+      document.head.appendChild(tag);
+    });
+  }
+  return loadHls.pending;
 }
 
 // downloadArchive hands the browser a URL rather than fetching it: the
@@ -1631,6 +1791,85 @@ function updatePicked() {
   const n = state.picked.size;
   el('btnRipSel').disabled = n === 0;
   el('selNote').textContent = n === 0 ? '' : tn('files.selected', n);
+}
+
+/* ---------- DVD titles ---------- */
+
+async function loadTitles() {
+  const id = state.selected;
+  if (!id) return;
+  try {
+    const r = await api(`/api/drives/${encodeURIComponent(id)}/titles`);
+    state.titles = r.titles || [];
+    fail('');
+  } catch (e) {
+    state.titles = [];
+    fail(String(e.message || e));
+  }
+  if (state.detail) renderPane(state.detail);
+}
+
+function renderDvdTab(d) {
+  // Rebuilding this would tear down a player in mid-sentence, which is what
+  // a snapshot twice a second would otherwise do for as long as the tab is
+  // open.
+  memo('dvd', [d.id, state.titles.map((x) => `${x.number}:${x.seconds}`).join('|')],
+    () => drawDvdTab(d));
+}
+
+function drawDvdTab(d) {
+  const titles = state.titles;
+  setHidden(el('dvdNone'), titles.length > 0);
+  setHidden(el('dvdBody'), titles.length === 0);
+  if (titles.length === 0) {
+    setText(el('dvdNone'), t('dvd.none'));
+    return;
+  }
+  const id = d.id;
+  const rows = el('titleRows');
+  for (const open of rows.querySelectorAll('tr[data-player="1"]')) closePlayer(open);
+  rows.textContent = '';
+  for (const title of titles) {
+    rows.appendChild(titleRow(id, title));
+  }
+}
+
+function titleRow(id, title) {
+  const tr = document.createElement('tr');
+  tr.appendChild(text('td', t('dvd.titleNumber', { n: String(title.number).padStart(2, '0') })));
+  tr.appendChild(text('td', clock(title.seconds), 'num'));
+  tr.appendChild(text('td', bytes(title.bytes), 'num drop-col'));
+
+  const act = document.createElement('td');
+  act.className = 'act';
+  // A title is played the same way a file no browser decodes is: converted
+  // as it is watched. What is different is that the disc knows how long it
+  // is, so the scrub bar is right from the first frame.
+  const play = text('button', t('files.play'));
+  play.type = 'button';
+  play.addEventListener('click', () => togglePlayer(tr, {
+    name: t('dvd.titleNumber', { n: String(title.number).padStart(2, '0') }),
+    type: 'video/mpeg', playable: false, transcodable: true, title: title.number,
+  }, '', id));
+  act.appendChild(play);
+
+  const take = text('button', t('files.take'));
+  take.type = 'button';
+  take.addEventListener('click', () => {
+    window.location.href = `/api/drives/${encodeURIComponent(id)}/file?title=${title.number}`;
+  });
+  act.appendChild(take);
+  tr.appendChild(act);
+  return tr;
+}
+
+// clock is a length as somebody reads it off a disc sleeve.
+function clock(seconds) {
+  const s = Math.round(seconds);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const rest = String(s % 60).padStart(2, '0');
+  return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${rest}` : `${m}:${rest}`;
 }
 
 /* ---------- audio ---------- */
@@ -2271,6 +2510,7 @@ function applySnapshot(snap) {
     state.path = '/';
     state.picked.clear();
     state.entries = [];
+    state.titles = [];
     forgetDisc();
     loadDetail();
     return;

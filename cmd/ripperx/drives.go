@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -50,6 +51,12 @@ type drive struct {
 	// discAt is when disc was last read, so a stale answer can be refreshed
 	// without asking the drive on every request.
 	discAt time.Time
+
+	// media is what has been worked out about the disc for a browser to
+	// play: durations and encoded segments, both dropped with the disc.
+	media *mediaCache
+	// transcodes bounds how many encoders may read this drive at once.
+	transcodes chan struct{}
 }
 
 type driveSet struct {
@@ -65,7 +72,11 @@ func newDriveSet(paths []string) *driveSet {
 		if _, dup := ds.byID[id]; dup {
 			continue
 		}
-		ds.byID[id] = &drive{id: id, path: p}
+		ds.byID[id] = &drive{
+			id: id, path: p,
+			media:      newMediaCache(),
+			transcodes: make(chan struct{}, transcodeSlots),
+		}
 		ds.order = append(ds.order, id)
 	}
 	return ds
@@ -306,8 +317,10 @@ func (d *drive) state(maxAge time.Duration) (*mmc.Capabilities, *mmc.Disc, error
 	d.caps, d.disc, d.discAt = caps, disc, time.Now()
 	if changed {
 		// The filesystem belongs to the disc that was in the drive, not to
-		// the drive; a swap invalidates it.
+		// the drive; a swap invalidates it, and everything worked out about
+		// what is on it with it.
 		d.iso, d.isoErr = nil, nil
+		d.media.clear()
 	}
 	d.mu.Unlock()
 	return caps, disc, nil
@@ -406,6 +419,11 @@ type driveView struct {
 	CanAppend     bool   `json:"canAppend" doc:"files can be added to the disc in this drive as a further session"`
 	AppendBlocker string `json:"appendBlocker,omitempty" doc:"why adding files is not offered, when it is not"`
 	BrowseError   string `json:"browseError,omitempty" doc:"why the filesystem could not be read, when it could not"`
+	// DVDTitles is how many titles the disc's own index names, and zero for
+	// anything that is not a DVD-Video. The page offers watching on the
+	// strength of it, because a DVD's files are not its films: only the
+	// index says where one title ends and the next begins.
+	DVDTitles int `json:"dvdTitles,omitempty" doc:"how many titles a DVD-Video names in its own index"`
 
 	// Fingerprint identifies the disc itself rather than the drive it is
 	// in: the same disc gives the same value whenever and wherever it is
@@ -460,6 +478,12 @@ func (s *server) viewDrive(d *drive, deep bool) driveView {
 		} else {
 			vol := fsys.Volume()
 			v.Volume, v.CanBrowse = &vol, true
+			// Reading the index is a handful of kilobytes and happens once
+			// per disc, so the deep view is the right place to find out
+			// whether there is anything to watch.
+			if dvd, err := d.dvd(); err == nil {
+				v.DVDTitles = len(dvd.Titles)
+			}
 		}
 	} else if disc.DataTracks > 0 {
 		v.CanBrowse = true
@@ -607,4 +631,177 @@ func (s *server) handleTray(w http.ResponseWriter, r *http.Request) {
 	d.disc, d.iso, d.isoErr, d.discAt = nil, nil, nil, time.Time{}
 	d.mu.Unlock()
 	writeJSON(w, http.StatusOK, statusMessage{Status: "tray " + action + "ed"})
+}
+
+// What has been worked out about the disc in a drive, rather than about the
+// drive: how long a film on it is, and the pieces of it already encoded for
+// a browser. Both belong to the disc, so both are dropped the moment one is
+// swapped - the same event that drops the filesystem.
+//
+// The segments are kept because seeking is the point of them. A player
+// scrubbing backwards over ground it has covered asks for segments it has
+// already been given, and answering those from memory is the difference
+// between a scrub bar and another trip across the disc.
+type mediaCache struct {
+	mu        sync.Mutex
+	durations map[string]float64
+	segments  map[string][]byte
+	order     []string
+	bytes     int64
+	limit     int64
+	// dvd is the disc's own index of its titles, read once: a DVD keeps
+	// several films in one set of files and only the index says where one
+	// ends and the next begins.
+	dvd    *dvdDisc
+	dvdErr error
+	// inflight is the segment each encoder is working on, so that asking
+	// for a segment twice waits once.
+	inflight map[string]*segmentJob
+}
+
+// segmentJob is one segment being encoded, and whoever is waiting for it.
+type segmentJob struct {
+	done chan struct{}
+	seg  []byte
+	err  error
+}
+
+// mediaCacheLimit is what a drive may keep. A segment of DVD video is one
+// to two megabytes, so this is a few minutes of film either side of where
+// the viewer is.
+const mediaCacheLimit = 64 << 20
+
+func newMediaCache() *mediaCache {
+	return &mediaCache{
+		durations: map[string]float64{},
+		segments:  map[string][]byte{},
+		inflight:  map[string]*segmentJob{},
+		limit:     mediaCacheLimit,
+	}
+}
+
+func (m *mediaCache) duration(path string) (float64, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	d, ok := m.durations[path]
+	return d, ok
+}
+
+func (m *mediaCache) setDuration(path string, d float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.durations[path] = d
+}
+
+func segmentKey(path string, n int) string {
+	return path + "\x00" + strconv.Itoa(n)
+}
+
+func (m *mediaCache) segment(path string, n int) ([]byte, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	seg, ok := m.segments[segmentKey(path, n)]
+	return seg, ok
+}
+
+func (m *mediaCache) setSegment(path string, n int, seg []byte) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := segmentKey(path, n)
+	if _, dup := m.segments[key]; dup {
+		return
+	}
+	m.segments[key] = seg
+	m.order = append(m.order, key)
+	m.bytes += int64(len(seg))
+	// Oldest first: a film is watched forwards, so what was encoded longest
+	// ago is what is least likely to be asked for again.
+	for m.bytes > m.limit && len(m.order) > 1 {
+		oldest := m.order[0]
+		m.order = m.order[1:]
+		m.bytes -= int64(len(m.segments[oldest]))
+		delete(m.segments, oldest)
+	}
+}
+
+// beginSegment hands back the job encoding this segment, and says whether
+// the caller is the one who has to do it.
+func (m *mediaCache) beginSegment(key string) (*segmentJob, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if job, running := m.inflight[key]; running {
+		return job, false
+	}
+	job := &segmentJob{done: make(chan struct{})}
+	m.inflight[key] = job
+	return job, true
+}
+
+func (m *mediaCache) finishSegment(key string, seg []byte, err error) {
+	m.mu.Lock()
+	job := m.inflight[key]
+	delete(m.inflight, key)
+	m.mu.Unlock()
+	if job == nil {
+		return
+	}
+	job.seg, job.err = seg, err
+	close(job.done)
+}
+
+func (m *mediaCache) clear() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.durations = map[string]float64{}
+	m.segments = map[string][]byte{}
+	m.order = nil
+	m.bytes = 0
+	m.dvd, m.dvdErr = nil, nil
+	// Whatever is being encoded belongs to the disc that has just left the
+	// drive. Its waiters are told so rather than handed the next disc's
+	// pictures.
+	for key, job := range m.inflight {
+		job.err = errors.New("the disc was changed while this was being converted")
+		close(job.done)
+		delete(m.inflight, key)
+	}
+}
+
+// dvd is the disc's index of its titles, read the first time it is wanted
+// and kept with everything else that belongs to this disc. A disc that is
+// not a DVD-Video is remembered as such too, so a page that polls does not
+// look for VIDEO_TS on an audio CD twice a second.
+func (d *drive) dvd() (*dvdDisc, error) {
+	fsys, err := d.filesystem()
+	if err != nil {
+		return nil, err
+	}
+	d.media.mu.Lock()
+	cached, cachedErr := d.media.dvd, d.media.dvdErr
+	d.media.mu.Unlock()
+	if cached != nil {
+		return cached, nil
+	}
+	if cachedErr != nil {
+		return nil, cachedErr
+	}
+
+	var disc *dvdDisc
+	err = d.borrow(func(*mmc.Drive) error {
+		var e error
+		disc, e = readDVD(fsys)
+		return e
+	})
+	if driveUnavailable(err) {
+		// The drive being busy says nothing about the disc, so it is not
+		// remembered as an answer about it.
+		return nil, err
+	}
+	d.media.mu.Lock()
+	d.media.dvd, d.media.dvdErr = disc, err
+	d.media.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return disc, nil
 }
