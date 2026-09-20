@@ -105,7 +105,16 @@ service account is in the `cdrom` group.
   one JSON file to `cmd/ripperx/web/locales` and nothing else. The menu is
   built from the files that are there; `-lang` picks the one a server serves
   by default, and anything a translation has no words for yet falls back to
-  it and then to English. English and Russian ship.
+  it and then to English — so a language can arrive a few strings at a time
+  and still be usable. `scripts/i18n-coverage.py` says how far each one has
+  got, and every release puts that table in its notes.
+
+  What the server says about itself stays in English: a burn that was
+  refused, a scan's verdict, the label on a job. Those are sentences written
+  where the reasoning is, not entries in a table. What the server
+  *enumerates* — what a drive can and cannot do, how it loads a disc, what
+  state a disc is in, the formats a folder can be taken as — travels with a
+  name beside the English, and the page translates the name.
 
 ## Installing it
 

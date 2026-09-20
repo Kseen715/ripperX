@@ -65,6 +65,31 @@ jobs:
       - run: npm install --no-audit --no-fund
       - run: npm test
 
+  # How much of the page each language has words for. It is a report rather
+  # than a gate: the page falls back to English for anything a translation
+  # is missing, so a language can arrive a few strings at a time - and the
+  # figure goes into the release notes so a reader can see how far it has
+  # got before installing.
+  i18n:
+    runs-on: ubuntu-latest
+    outputs:
+      table: ${{ steps.coverage.outputs.table }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Measure the translations
+        id: coverage
+        run: |
+          scripts/i18n-coverage.py
+          {
+            echo 'table<<COVERAGE_EOF'
+            scripts/i18n-coverage.py --format md
+            echo 'COVERAGE_EOF'
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo '### Translations'
+            scripts/i18n-coverage.py --format md
+          } >> "$GITHUB_STEP_SUMMARY"
+
   build:
     needs: [test, ui, version]
     runs-on: ubuntu-latest
@@ -128,7 +153,7 @@ jobs:
     # Pushes to the default branch and manual runs cut a release; pull
     # requests stop at the artifacts above.
     if: github.event_name != 'pull_request'
-    needs: [version, build]
+    needs: [version, build, i18n]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -169,3 +194,12 @@ jobs:
 
                 chmod +x ripperx-${{ needs.version.outputs.tag }}-linux-x86_64
                 ./ripperx-${{ needs.version.outputs.tag }}-linux-x86_64 -addr 0.0.0.0:8080 -out /srv/images
+
+            ### Translations
+
+            The page is shown in whichever of these the browser asks for, and
+            `-lang` picks the one this server serves by default. Anything a
+            translation has no words for yet falls back to that language, and
+            then to English, so a partly finished one is usable.
+
+            ${{ needs.i18n.outputs.table }}

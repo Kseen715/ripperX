@@ -382,18 +382,30 @@ const settle = () => new Promise((r) => setTimeout(r, 30));
   check('every string on the page has a translation', missing.size === 0,
     Array.from(missing).join(', '));
 
-  // And the locale files agree with each other about which keys exist, so a
-  // language added later is not quietly half-finished.
+  // English is the source every other file is a translation of, so a key
+  // it does not have is a key nothing can fall back to.
+  //
+  // A key another language is *missing* is not an error: the whole point of
+  // the fallback chain is that a language can be added a few lines at a
+  // time, and the CI job reports how far each one has got. A key another
+  // language has and English does not is a different thing - a typo, or a
+  // string deleted from the code and left behind - and that does fail.
+  // A key beginning with an underscore is metadata - what the language calls
+  // itself, which plural rule it uses - and not a string anybody reads.
   const stem = (k) => k.replace(/\.(one|few|many|other)$/, '');
-  const enKeys = new Set(Object.keys(locales.en).map(stem));
+  const translatable = (dict) =>
+    new Set(Object.keys(dict).filter((k) => !k.startsWith('_')).map(stem));
+  const enKeys = translatable(locales.en);
   for (const [code, dict] of Object.entries(locales)) {
     if (code === 'en') continue;
-    const have = new Set(Object.keys(dict).map(stem));
-    const gaps = Array.from(enKeys).filter((k) => !have.has(k));
+    const have = translatable(dict);
     const extra = Array.from(have).filter((k) => !enKeys.has(k));
-    check(`${code}.json covers the same keys as en.json`,
-      gaps.length === 0 && extra.length === 0,
-      `missing: ${gaps.join(', ')} | unknown: ${extra.join(', ')}`);
+    const gaps = Array.from(enKeys).filter((k) => !have.has(k));
+    check(`${code}.json has no keys en.json does not`, extra.length === 0,
+      extra.join(', '));
+    const done = enKeys.size - gaps.length;
+    console.log(`      ${code}: ${Math.round((done / enKeys.size) * 100)}% ` +
+      `translated (${done}/${enKeys.size})`);
   }
 
   console.log(failures ? `\n${failures} failed` : '\nall good');

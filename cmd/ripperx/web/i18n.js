@@ -60,6 +60,16 @@ const i18n = (() => {
 
   function t(key, vars) { return fill(lookup(key), vars); }
 
+  // maybe is t for a key that may legitimately not exist. The server names
+  // the fixed words it uses - what a drive can do, how it loads a disc, what
+  // state a disc is in - and sends its own English alongside each name; the
+  // page translates the name where it can and shows the server's word where
+  // it cannot, rather than a key nobody can read.
+  function maybe(key, vars) {
+    const s = lookup(key);
+    return s === key ? undefined : fill(s, vars);
+  }
+
   // tn picks the form that goes with a count and passes the count in as
   // {n}, so a translation writes "{n} discs" without the caller knowing how
   // many forms the language has.
@@ -153,7 +163,7 @@ const i18n = (() => {
   }
 
   return {
-    t, tn, apply, start, choose,
+    t, tn, maybe, apply, start, choose,
     get code() { return state.code; },
     get languages() { return state.languages; },
   };
@@ -161,3 +171,19 @@ const i18n = (() => {
 
 const t = (key, vars) => i18n.t(key, vars);
 const tn = (key, n, vars) => i18n.tn(key, n, vars);
+
+// tOr translates something the server named, falling back to the words the
+// server sent with it. A locale that has not caught up with a new drive
+// capability shows the English sentence rather than a gap.
+const tOr = (key, fallback) => {
+  const s = i18n.maybe(key);
+  return s === undefined ? fallback : s;
+};
+
+// serverWord is tOr for a value that is itself the name - a loading
+// mechanism, a disc's state - with the punctuation flattened so it can be
+// part of a key.
+const serverWord = (prefix, value) => {
+  if (!value) return value;
+  return tOr(`${prefix}.${String(value).replace(/[^A-Za-z0-9]+/g, '-')}`, value);
+};

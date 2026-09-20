@@ -86,9 +86,37 @@ func TestSummariseAccountsForEverything(t *testing.T) {
 
 	// The raw-read line is the one a user acts on, so it has to say what the
 	// consequence is rather than name the feature.
-	joined := strings.Join(none.Cannot, "\n")
+	var lines []string
+	for _, a := range none.Cannot {
+		lines = append(lines, a.Text)
+	}
+	joined := strings.Join(lines, "\n")
 	if !strings.Contains(joined, "no audio, no raw image") {
 		t.Errorf("the raw-read refusal does not say what it costs:\n%s", joined)
+	}
+
+	// Every line carries a name, and no two lines share one: the name is
+	// what a translation is looked up by, and two abilities under one name
+	// would show the same sentence for both.
+	seen := map[string]bool{}
+	for _, a := range append(append([]Ability{}, full.Can...), none.Cannot...) {
+		if a.Name == "" {
+			t.Errorf("%q has no name to look a translation up by", a.Text)
+		}
+		if a.Text == "" {
+			t.Errorf("%q has a name and nothing to say", a.Name)
+		}
+	}
+	for _, a := range full.Can {
+		if seen[a.Name] {
+			t.Errorf("two abilities are both called %q", a.Name)
+		}
+		seen[a.Name] = true
+	}
+	for _, a := range none.Cannot {
+		if !seen[a.Name] {
+			t.Errorf("%q appears only in the cannot list", a.Name)
+		}
 	}
 }
 

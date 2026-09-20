@@ -63,12 +63,26 @@ type Capabilities struct {
 	// Can and Cannot are the above rendered as sentences, in a fixed order,
 	// for a page that wants to show a drive's abilities without knowing what
 	// any individual flag means.
-	Can    []string `json:"can"`
-	Cannot []string `json:"cannot"`
+	Can    []Ability `json:"can"`
+	Cannot []Ability `json:"cannot"`
 
 	// Notes records what could not be asked, so a sparse answer from an old
 	// drive does not read as a drive that cannot do anything.
 	Notes []string `json:"notes,omitempty"`
+}
+
+// Ability is one line of those two lists: a name that does not change, and
+// the sentence this package would put on a screen in English.
+//
+// The name is there because the sentence is not the only rendering there
+// will ever be. A page in another language needs something stable to look a
+// translation up by, and matching on the English text would mean a
+// translation quietly disappearing the day a word in it was improved. The
+// name says which ability; which list it is in says whether the drive has
+// it.
+type Ability struct {
+	Name string `json:"name" doc:"a stable name for this ability, to look a translation up by"`
+	Text string `json:"text" doc:"the same thing as a sentence, in English"`
 }
 
 // MediaSupport is which disc families the drive handles, for reading or for
@@ -373,6 +387,10 @@ func (c *Capabilities) applyProfiles() {
 	}
 }
 
+// loadingMechanism names how a disc gets into the drive. The answers are
+// names rather than sentences, for the same reason an Ability has one: a
+// page shows them in whatever language it is in, and it needs something
+// that does not change underneath a translation.
 func loadingMechanism(t byte) string {
 	switch t {
 	case 0:
@@ -382,9 +400,9 @@ func loadingMechanism(t byte) string {
 	case 2:
 		return "pop-up"
 	case 4:
-		return "changer, individual discs"
+		return "changer-individual"
 	case 5:
-		return "changer, magazine"
+		return "changer-magazine"
 	default:
 		return "unknown"
 	}
@@ -521,39 +539,39 @@ func serialNumber(body []byte) string {
 // asked of it, not a probe that gave up.
 func (c *Capabilities) summarise() {
 	c.Can, c.Cannot = nil, nil
-	say := func(ok bool, yes, no string) {
+	say := func(name string, ok bool, yes, no string) {
 		if ok {
-			c.Can = append(c.Can, yes)
+			c.Can = append(c.Can, Ability{Name: name, Text: yes})
 		} else {
-			c.Cannot = append(c.Cannot, no)
+			c.Cannot = append(c.Cannot, Ability{Name: name, Text: no})
 		}
 	}
 
-	say(c.Read.CD, "read CD-ROM and CD-R discs", "read CD discs")
-	say(c.Read.CDRW, "read CD-RW discs", "read CD-RW discs")
-	say(c.Read.DVD, "read DVD discs", "read DVD discs")
-	say(c.Read.BD, "read Blu-ray discs", "read Blu-ray discs")
-	say(c.CanReadRawCD, "read raw 2352-byte sectors, so audio tracks and exact disc images are possible",
+	say("readCD", c.Read.CD, "read CD-ROM and CD-R discs", "read CD discs")
+	say("readCDRW", c.Read.CDRW, "read CD-RW discs", "read CD-RW discs")
+	say("readDVD", c.Read.DVD, "read DVD discs", "read DVD discs")
+	say("readBD", c.Read.BD, "read Blu-ray discs", "read Blu-ray discs")
+	say("readRaw", c.CanReadRawCD, "read raw 2352-byte sectors, so audio tracks and exact disc images are possible",
 		"read raw sectors, so only 2048-byte data sectors can be ripped - no audio, no raw image")
-	say(c.CanReadC2Errors, "report C2 error pointers, so a rip can say which bytes it is unsure of",
+	say("readC2", c.CanReadC2Errors, "report C2 error pointers, so a rip can say which bytes it is unsure of",
 		"report C2 error pointers, so a rip cannot tell a clean sector from a guessed one")
-	say(c.CanReadAccurateCDDA, "return audio samples at the address asked for, so an audio rip needs no jitter correction",
+	say("accurateCDDA", c.CanReadAccurateCDDA, "return audio samples at the address asked for, so an audio rip needs no jitter correction",
 		"guarantee audio samples land at the address asked for, so an audio rip may drift by a few samples between reads")
-	say(c.CanReadMode2Form2, "read Mode 2 Form 2 sectors, as used by Video CD and photo discs",
+	say("mode2Form2", c.CanReadMode2Form2, "read Mode 2 Form 2 sectors, as used by Video CD and photo discs",
 		"read Mode 2 Form 2 sectors, so Video CD and photo discs may rip short")
-	say(c.CanReadCDText, "read CD-Text", "read CD-Text")
-	say(c.CanReadISRC, "read track ISRC codes", "read track ISRC codes")
-	say(c.CanReadUPC, "read the disc's media catalogue number", "read the disc's media catalogue number")
-	say(c.Write.CDR, "write CD-R discs", "write CD-R discs")
-	say(c.Write.CDRW, "write and erase CD-RW discs", "write CD-RW discs")
-	say(c.Write.DVDR || c.Write.DVDPlusR, "write recordable DVDs", "write recordable DVDs")
-	say(c.Write.DVDRW || c.Write.DVDPlusRW || c.Write.DVDRAM, "write rewritable DVDs", "write rewritable DVDs")
-	say(c.Write.BD, "write Blu-ray discs", "write Blu-ray discs")
-	say(c.CanWriteSAO, "burn a disc in one pass (session at once), which is what an exact image copy needs",
+	say("cdText", c.CanReadCDText, "read CD-Text", "read CD-Text")
+	say("isrc", c.CanReadISRC, "read track ISRC codes", "read track ISRC codes")
+	say("upc", c.CanReadUPC, "read the disc's media catalogue number", "read the disc's media catalogue number")
+	say("writeCDR", c.Write.CDR, "write CD-R discs", "write CD-R discs")
+	say("writeCDRW", c.Write.CDRW, "write and erase CD-RW discs", "write CD-RW discs")
+	say("writeDVDR", c.Write.DVDR || c.Write.DVDPlusR, "write recordable DVDs", "write recordable DVDs")
+	say("writeDVDRW", c.Write.DVDRW || c.Write.DVDPlusRW || c.Write.DVDRAM, "write rewritable DVDs", "write rewritable DVDs")
+	say("writeBD", c.Write.BD, "write Blu-ray discs", "write Blu-ray discs")
+	say("sessionAtOnce", c.CanWriteSAO, "burn a disc in one pass (session at once), which is what an exact image copy needs",
 		"burn session-at-once, so an image with its own layout cannot be written exactly")
-	say(c.CanWriteTAO, "burn track at once", "burn track at once")
-	say(c.CanTestWrite, "run a burn with the laser off as a rehearsal", "rehearse a burn with the laser off")
-	say(c.HasBurnProof, "recover from a buffer underrun mid-burn", "recover from a buffer underrun, so a slow source can ruin a disc")
-	say(c.CanEject, "open and close its tray under software control", "open its tray under software control")
-	say(c.IsMultiRead, "read multi-session and packet-written discs", "read packet-written discs reliably")
+	say("trackAtOnce", c.CanWriteTAO, "burn track at once", "burn track at once")
+	say("testWrite", c.CanTestWrite, "run a burn with the laser off as a rehearsal", "rehearse a burn with the laser off")
+	say("burnProof", c.HasBurnProof, "recover from a buffer underrun mid-burn", "recover from a buffer underrun, so a slow source can ruin a disc")
+	say("eject", c.CanEject, "open and close its tray under software control", "open its tray under software control")
+	say("multiRead", c.IsMultiRead, "read multi-session and packet-written discs", "read packet-written discs reliably")
 }

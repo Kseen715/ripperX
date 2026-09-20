@@ -355,7 +355,7 @@ function describeDisc(d) {
   if (d.error) return d.error;
   if (!d.disc || !d.disc.present) return d.disc && d.disc.error ? d.disc.error : t('disc.none');
   const bits = [];
-  if (d.disc.statusName) bits.push(d.disc.statusName);
+  if (d.disc.statusName) bits.push(serverWord('discStatus', d.disc.statusName));
   if (d.disc.sectors) bits.push(bytes(d.disc.dataBytes));
   if (d.disc.audioTracks) bits.push(tn('disc.audioTracks', d.disc.audioTracks));
   if (d.disc.dataTracks) bits.push(t('disc.data'));
@@ -534,7 +534,7 @@ function renderDiscHead(d) {
     if (present) {
       if (disc.profileName) tags.push(['chip', disc.profileName]);
       if (vol && vol.format) tags.push(['chip', vol.format]);
-      if (disc.statusName) tags.push(['chip none', disc.statusName]);
+      if (disc.statusName) tags.push(['chip none', serverWord('discStatus', disc.statusName)]);
     }
     sync(el('discTags'), tags, (tag) => tag[1],
       () => text('span', '', 'chip'),
@@ -552,7 +552,9 @@ function discSummary(d) {
   if (disc.audioTracks) bits.push(tn('disc.audioTracks', disc.audioTracks));
   if (disc.sessions > 1) bits.push(tn('disc.sessions', disc.sessions));
   if (d.volume && d.volume.format) bits.push(t('disc.readAs', { format: d.volume.format }));
-  if (!bits.length) bits.push(disc.statusName || t('disc.nothingReadable'));
+  if (!bits.length) {
+    bits.push(serverWord('discStatus', disc.statusName) || t('disc.nothingReadable'));
+  }
   return bits.join(' · ');
 }
 
@@ -561,7 +563,8 @@ function renderDiscFacts(d) {
   const vol = d.volume;
   dl(el('discFacts'), [
     [t('fact.disc'), disc.profileName],
-    [t('fact.state'), disc.statusName + (disc.erasable ? t('fact.erasable') : '')],
+    [t('fact.state'), serverWord('discStatus', disc.statusName) +
+      (disc.erasable ? t('fact.erasable') : '')],
     [t('fact.sessions'), disc.sessions || null],
     [t('fact.tracks'), `${disc.tracks ? disc.tracks.length : 0}` +
       (disc.audioTracks ? ` ${t('fact.ofWhichAudio', { n: disc.audioTracks })}` : '')],
@@ -1219,8 +1222,9 @@ function openArchiveDialog(purpose) {
     });
     label.appendChild(radio);
     const body = document.createElement('span');
-    body.appendChild(text('span', `${f.name} (${f.extension})`, 'name'));
-    body.appendChild(text('span', f.note, 'why'));
+    body.appendChild(text('span',
+      `${tOr(`format.${f.id}.name`, f.name)} (${f.extension})`, 'name'));
+    body.appendChild(text('span', tOr(`format.${f.id}.note`, f.note), 'why'));
     label.appendChild(body);
     box.appendChild(label);
   });
@@ -1703,7 +1707,7 @@ function drawDriveTab(d) {
     [t('drive.model'), `${c.info.vendor} ${c.info.product}`],
     [t('drive.firmware'), c.info.version],
     [t('drive.serial'), c.serialNumber || null],
-    [t('drive.loading'), c.loadingMechanism],
+    [t('drive.loading'), serverWord('mech', c.loadingMechanism)],
     [t('drive.buffer'), c.bufferKb ? `${c.bufferKb} ${t('unit.kb')}` : null],
     [t('drive.readsUpTo'), x(c.maxReadSpeedKb)],
     [t('drive.readingAt'), x(c.currentReadSpeedKb)],
@@ -1711,12 +1715,17 @@ function drawDriveTab(d) {
     [t('drive.inTheDrive'), c.currentProfileName],
   ]);
 
-  const fill = (node, list) => {
+  // Each line carries the name of the ability as well as the sentence, so
+  // it can be translated by the name and fall back to the sentence the
+  // server sent when a locale has no words for it yet.
+  const fill = (node, list, can) => {
     node.textContent = '';
-    for (const line of list || []) node.appendChild(text('li', line));
+    for (const a of list || []) {
+      node.appendChild(text('li', tOr(`cap.${a.name}.${can ? 'can' : 'cannot'}`, a.text)));
+    }
   };
-  fill(el('can'), c.can);
-  fill(el('cannot'), c.cannot);
+  fill(el('can'), c.can, true);
+  fill(el('cannot'), c.cannot, false);
   el('capNotes').textContent = (c.notes || []).join(' ');
 }
 
